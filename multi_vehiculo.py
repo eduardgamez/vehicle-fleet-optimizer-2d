@@ -41,7 +41,7 @@ Requiere solo la librería estándar (tkinter). Ejecutar con un Python con Tk:
 """
 
 import math
-import bisect
+import time
 import heapq
 import random
 import tkinter as tk
@@ -65,6 +65,11 @@ PALETA = [
 ]
 
 DT = 0.1            # paso de integración temporal (s)
+
+# Dimensiones y velocidad de los vehículos (fijas; ya no editables en el panel)
+VEH_LEN = 1.3       # largo (m)
+VEH_WID = 0.7       # ancho (m)
+VEH_VMAX = 2.5      # velocidad máxima (m/s)
 
 
 # --------------------------------------------------------------------------- #
@@ -216,9 +221,11 @@ class Vehiculo:
         self.wheelbase = 0.55 * length
         self.delta_max = math.radians(35)     # ángulo de dirección máximo
         self.v_max = v_max
-        self.a_max = 3.0
-        self.traj = []                # [(x, y, theta), ...]  una pose por paso
-        self.dt_plan = 0.4            # duración de cada paso (s)
+        self.a_max = 1.0              # aceleración/frenado máximos (m/s²): baja
+        # traj: una pose por PASO FINO (de DT segundos), ya con la velocidad
+        # incorporada por el planificador (el espaciado entre poses ES v·DT).
+        self.traj = []                # [(x, y, theta), ...]
+        self.dt_plan = DT             # duración de cada paso de la trayectoria
 
     @property
     def radio_giro_min(self):
@@ -229,23 +236,20 @@ class Vehiculo:
         return math.hypot(self.length, self.width)
 
     def pose_en_tiempo(self, t):
-        """Pose interpolada en el instante t (s) de la trayectoria temporal.
-        Tras el final, se queda en su meta (vehículo aparcado)."""
+        """Pose en el instante t (s). Como cada paso de 'traj' dura DT, basta
+        indexar. Tras el final, se queda en su meta (vehículo aparcado)."""
         if not self.traj:
             return self.inicio
-        f = t / self.dt_plan
-        i = int(f)
-        if i >= len(self.traj) - 1:
+        i = int(round(t / DT))
+        if i >= len(self.traj):
             return self.traj[-1]
-        frac = f - i
-        x0, y0, th0 = self.traj[i]
-        x1, y1, th1 = self.traj[i + 1]
-        dth = math.atan2(math.sin(th1 - th0), math.cos(th1 - th0))
-        return (x0 + (x1 - x0) * frac, y0 + (y1 - y0) * frac, th0 + dth * frac)
+        if i < 0:
+            return self.traj[0]
+        return self.traj[i]
 
     @property
     def duracion(self):
-        return max(0, len(self.traj) - 1) * self.dt_plan
+        return max(0, len(self.traj) - 1) * DT
 
 
 # --------------------------------------------------------------------------- #
@@ -289,22 +293,74 @@ class Planificador:
     def __init__(self, entorno):
         self.env = entorno
         self.res_pos = 0.7
-        self.res_ang = math.radians(18)
+        # Heurístico holonómico CON obstáculos (Dijkstra en rejilla): guía la
+        # búsqueda rodeando los obstáculos desde el inicio → rutas más directas.
+        self.h_res = 0.5             # tamaño de celda de la rejilla del heurístico
+        self._occ_sig = None         # firma de la rejilla de ocupación cacheada
+        self.res_v = 0.5             # discretización de la velocidad (m/s)
         self.dt = 0.4                 # duración de cada acción macro (s)
         self.subpasos = 4             # → TAU = dt/subpasos = 0.1 s = DT
         self.goal_tol = 1.6
-        self.max_exp = 120000
-        self.k_max = 900              # horizonte temporal (pasos finos ≈ 90 s)
-        self.dist_tiro = 14.0
+        self.v_tol = 0.45             # velocidad para considerar "detenido"
+        self.k_max = 1600             # horizonte temporal (pasos finos)
+        # Conexión analítica (pure-pursuit) para rematar la llegada. Solo se
+        # dispara si el vehículo ya está BIEN ALINEADO con la meta (ang_tiro) o
+        # muy cerca; si llega mal orientado, la búsqueda sigue girando para
+        # alinearse y luego remata recto (evita el arco único y AMPLIO hacia la
+        # meta, que no es la ruta más rápida).
+        self.dist_tiro = 10.0
+        self.ang_tiro = math.radians(30)
         self.margen = 0.10            # holgura contra obstáculos fijos
-        self.margen_din = 0.30        # holgura contra otros vehículos
-        self.peso_h = 1.5             # A* ponderado (acelera la búsqueda)
+        self.margen_din = 0.15        # holgura contra otros vehículos (pasos ceñidos)
         self.bloqueos = []            # metas ajenas (estáticas) [(poly, bb)]
+        # se fijan por vehículo en planificar():
+        self.v_max_c = 5.0            # velocidad máxima (nunca superada)
+        self.a_max = 1.0              # aceleración/frenado máximos (acotados)
+        self.v_rev = 2.5              # velocidad máxima de marcha atrás
+        # calidad de la búsqueda (nº de primitivas de giro, resolución angular,
+        # heurístico y tope de expansiones). La fija configurar_calidad().
+        self.res_ang = math.radians(10)
+        self.max_exp = 600000
+        self.peso_h = 1.6
+        self.dir_fracs = []
+        self.configurar_calidad(3)
+        # límites de RESPUESTA (para que nunca se cuelgue con muchos vehículos):
+        self.deadline = None         # perf_counter límite; None = sin límite
+        self.tick = None             # callback(expand) periódico (refresca UI)
+
+    def configurar_calidad(self, nivel):
+        """Ajusta el equilibrio TIEMPO ↔ CALIDAD de ruta. A mayor nivel: más
+        ángulos de giro posibles (más densos cerca de 0 para corregir el rumbo
+        con finura), resolución angular más fina, heurístico menos goloso (rutas
+        más cortas) y más expansiones permitidas. Cuesta más tiempo de cálculo."""
+        # Nota: 'peso_h' se mantiene ALTO (búsqueda golosa = rápida) en todos los
+        # niveles. Bajarlo no acorta las rutas (comprobado) y sí ralentiza mucho la
+        # búsqueda, llegando a FALLAR en casos difíciles. La calidad sube por más
+        # primitivas de giro y resolución angular más fina, no por menos golosidad.
+        tabla = {
+            1: (9,  14, 2.3, 250000),   # rápido
+            2: (13, 13, 2.2, 400000),
+            3: (17, 12, 2.1, 600000),   # predeterminado (alto, pero ágil)
+            4: (27, 10, 2.0, 1000000),
+            5: (41,  8, 1.9, 1700000),  # máxima calidad (lento)
+        }
+        n_dir, ang, peso, mx = tabla.get(int(nivel), tabla[3])
+        half = n_dir // 2
+        # fracciones de dmax simétricas, con espaciado más fino cerca de 0
+        fracs = [0.0]
+        for i in range(1, half + 1):
+            f = (i / half) ** 1.3
+            fracs += [f, -f]
+        self.dir_fracs = sorted(fracs)
+        self.res_ang = math.radians(ang)
+        self.peso_h = peso
+        self.max_exp = mx
 
     # ---- utilidades de ocupación estática (obstáculos + metas ajenas) ---- #
-    def _clave(self, x, y, th, k):
+    def _clave(self, x, y, th, v, k):
         return (int(x / self.res_pos), int(y / self.res_pos),
-                int((th % (2 * math.pi)) / self.res_ang), k)
+                int((th % (2 * math.pi)) / self.res_ang),
+                int(round(v / self.res_v)), k)
 
     def _libre(self, x, y, th):
         if not self.env.libre(x, y, th, self._len, self._wid, self.margen):
@@ -320,21 +376,24 @@ class Planificador:
                     return False
         return True
 
-    def _mover(self, x, y, th, speed, delta, L):
-        """Integra una acción macro (modelo de bicicleta) a velocidad 'speed'
-        (con signo) y dirección 'delta', devolviendo la lista de poses de cada
-        SUBPASO (a TAU = dt/subpasos = DT segundos) sobre el arco real, o None
+    def _mover(self, x, y, th, v, accel, delta, L):
+        """Integra una acción macro (modelo de bicicleta) partiendo de la
+        velocidad 'v' (con signo) y aplicando la aceleración 'accel' (acotada)
+        y la dirección 'delta'. La velocidad evoluciona en cada SUBPASO sin
+        superar nunca v_max (avance) ni v_rev (retroceso). Devuelve
+        (lista de poses por subpaso a TAU=DT, velocidad final) o (None, None)
         si algún subpaso choca con un obstáculo fijo."""
         h = self.dt / self.subpasos
         subs = []
         for _ in range(self.subpasos):
-            th = th + (1.0 / L) * math.tan(delta) * (speed * h)
-            x = x + math.cos(th) * speed * h
-            y = y + math.sin(th) * speed * h
+            v = min(self.v_max_c, max(-self.v_rev, v + accel * h))
+            th = th + (1.0 / L) * math.tan(delta) * (v * h)
+            x = x + math.cos(th) * v * h
+            y = y + math.sin(th) * v * h
             if not self._libre(x, y, th):
-                return None
+                return None, None
             subs.append((x, y, th))
-        return subs
+        return subs, v
 
     def _choca_din(self, x, y, th, k, reservas):
         corners = obb_corners(x, y, th, self._len + 2 * self.margen_din,
@@ -350,108 +409,281 @@ class Planificador:
                 return False
         return True
 
-    def _tiro_directo(self, x, y, th, k, gx, gy, L, dmax, v_c, reservas):
-        """Conexión analítica hacia la meta (pure pursuit) comprobando estática
-        y reservas dinámicas en CADA subpaso. Devuelve la lista densa de poses
-        (a TAU) o None."""
+    def _aparcamiento_libre(self, pose, k0, reservas):
+        """Al llegar a la meta el vehículo se queda APARCADO ahí para siempre.
+        Hay que garantizar que esa plaza no la pise NINGÚN vehículo reservado en
+        NINGÚN instante futuro (incluidos los de mayor prioridad, ya planificados,
+        que podrían pasar por ahí más tarde). Comprueba la pose final contra todas
+        las reservas desde k0 hasta que todas están paradas."""
+        x, y, th = pose
+        kfin = k0
+        for traj, _, _ in reservas.items:
+            if len(traj) > kfin:
+                kfin = len(traj)
+        for k in range(k0, kfin + 1):
+            if self._choca_din(x, y, th, k, reservas):
+                return False
+        return True
+
+    def _tiro_directo(self, x, y, th, v, k, gx, gy, L, dmax, reservas):
+        """Conexión analítica hacia la meta (pure pursuit) con FRENADO: regula
+        la velocidad para acercarse a v_max en tramo libre y decelerar —con
+        aceleración acotada— hasta detenerse justo en la meta. Comprueba la
+        estática y las reservas dinámicas en CADA paso fino. Devuelve la lista
+        densa de poses (una por DT) o None."""
+        h = self.dt / self.subpasos      # = DT
         poses = []
         kk = k
-        for _ in range(120):
+        d0 = math.hypot(gx - x, gy - y)  # distancia inicial a la meta
+        largo = 0.0                      # longitud recorrida por el remate
+        # Tope anti-BUCLE: un remate directo recorre ~d0 (con una curva suave si
+        # venía algo desviado). Si el pure-pursuit se enrosca para reencarar la
+        # meta (porque apunta hacia otro lado), su longitud se dispara muy por
+        # encima de d0 → lo descartamos y la búsqueda sigue hasta encarar bien,
+        # en vez de dejar ese rizo circular feo justo antes de aparcar.
+        largo_max = 1.5 * d0 + 2.0 * self.goal_tol
+        for _ in range(600):
             d = math.hypot(gx - x, gy - y)
-            if d <= self.goal_tol:
+            if d <= self.goal_tol and abs(v) <= self.v_tol:
                 return poses
+            # velocidad deseada: la máxima que aún permite frenar a tiempo
+            v_des = min(self.v_max_c, math.sqrt(2.0 * self.a_max * max(d, 0.0)))
+            dv = max(-self.a_max * h, min(self.a_max * h, v_des - v))
+            v = min(self.v_max_c, max(0.0, v + dv))     # aproxima siempre de frente
             alpha = math.atan2(gy - y, gx - x) - th
             alpha = math.atan2(math.sin(alpha), math.cos(alpha))
             delta = max(-dmax, min(dmax, math.atan2(2.0 * L * math.sin(alpha), max(d, 1e-3))))
-            subs = self._mover(x, y, th, v_c, delta, L)
-            if subs is None or not self._subs_libres_din(subs, kk, reservas):
+            th = th + (1.0 / L) * math.tan(delta) * (v * h)
+            x = x + math.cos(th) * v * h
+            y = y + math.sin(th) * v * h
+            largo += abs(v) * h
+            if largo > largo_max:                        # se está enroscando
                 return None
-            poses.extend(subs)
-            x, y, th = subs[-1]
-            kk += self.subpasos
+            if not self._libre(x, y, th):
+                return None
+            if self._choca_din(x, y, th, kk + 1, reservas):
+                return None
+            poses.append((x, y, th))
+            kk += 1
+            if v < 1e-3 and d > self.goal_tol:           # se paró sin llegar
+                return None
         return None
 
+    # ------------------- heurístico con obstáculos ------------------------ #
+    def _asegurar_ocupacion(self):
+        """Rejilla de ocupación (celda libre / bloqueada) del mapa, INFLADA por
+        el semiancho del vehículo para que su CENTRO no pegue con los muros.
+        Depende solo de los obstáculos (fijos) y del tamaño del vehículo, así que
+        se calcula una vez por mapa y se reutiliza para todos los vehículos."""
+        infl = 0.5 * self._wid + self.margen
+        sig = (id(self.env.obstaculos), round(infl, 3), self.h_res)
+        if self._occ_sig == sig:
+            return
+        res = self.h_res
+        nx = int(W / res) + 1
+        ny = int(H / res) + 1
+        occ = [[self.env.libre(ix * res, iy * res, 0.0, 0.0, 0.0, infl)
+                for iy in range(ny)] for ix in range(nx)]
+        self._occ = occ
+        self._occ_nx, self._occ_ny = nx, ny
+        self._occ_sig = sig
+
+    def _construir_heuristica(self, gx, gy):
+        """Campo de distancias desde la meta por Dijkstra 8-conexo sobre la
+        rejilla libre. Es la longitud del camino MÁS CORTO que rodea obstáculos
+        (holonómico); como el coche real (no holonómico) no puede ser más corto,
+        orienta bien la búsqueda hacia rutas directas. Cachea (gx, gy) para el
+        respaldo euclídeo cuando una pose cae fuera de la rejilla o en celda
+        bloqueada."""
+        self._asegurar_ocupacion()
+        res = self.h_res
+        nx, ny, occ = self._occ_nx, self._occ_ny, self._occ
+        INF = float("inf")
+        dist = [[INF] * ny for _ in range(nx)]
+        gi = min(nx - 1, max(0, int(round(gx / res))))
+        gj = min(ny - 1, max(0, int(round(gy / res))))
+        if not occ[gi][gj]:                       # meta en celda inflada-bloqueada:
+            bd = INF                              # usa la celda libre más cercana
+            for ix in range(nx):
+                for iy in range(ny):
+                    if occ[ix][iy]:
+                        dd = (ix * res - gx) ** 2 + (iy * res - gy) ** 2
+                        if dd < bd:
+                            bd, gi, gj = dd, ix, iy
+        vecinos = ((1, 0, res), (-1, 0, res), (0, 1, res), (0, -1, res),
+                   (1, 1, res * 1.41421356), (1, -1, res * 1.41421356),
+                   (-1, 1, res * 1.41421356), (-1, -1, res * 1.41421356))
+        dist[gi][gj] = 0.0
+        pq = [(0.0, gi, gj)]
+        while pq:
+            d, ix, iy = heapq.heappop(pq)
+            if d > dist[ix][iy]:
+                continue
+            for dx, dy, c in vecinos:
+                jx, jy = ix + dx, iy + dy
+                if 0 <= jx < nx and 0 <= jy < ny and occ[jx][jy]:
+                    nd = d + c
+                    if nd < dist[jx][jy]:
+                        dist[jx][jy] = nd
+                        heapq.heappush(pq, (nd, jx, jy))
+        self._hdist = dist
+        self._h_gx, self._h_gy = gx, gy
+
+    def _h_time(self, x, y):
+        """Tiempo estimado a la meta = distancia (rejilla con obstáculos) / v_max.
+        Respaldo euclídeo si la pose queda fuera de la rejilla o en celda sin
+        distancia calculada (aislada)."""
+        res = self.h_res
+        ix = int(round(x / res))
+        iy = int(round(y / res))
+        if 0 <= ix < self._occ_nx and 0 <= iy < self._occ_ny:
+            d = self._hdist[ix][iy]
+            if d < float("inf"):
+                return d / self.v_max_c
+        return math.hypot(x - self._h_gx, y - self._h_gy) / self.v_max_c
+
     def planificar(self, veh, reservas):
-        """Devuelve la trayectoria temporal [(x,y,th), ...] (una pose por paso)
-        o None si no halla solución coordinada."""
+        """Devuelve la trayectoria [(x,y,th), ...] (una pose por PASO FINO de DT,
+        ya con la velocidad incorporada) o None si no halla solución coordinada.
+
+        El estado incluye la VELOCIDAD (x, y, θ, v, k) y las acciones eligen la
+        ACELERACIÓN (acotada) además de la dirección. Así el planificador puede
+        acelerar o frenar EN CUALQUIER MOMENTO —p. ej. decelerar antes de un giro
+        y volver a acelerar al salir— si eso da una ruta mejor. Parte del reposo
+        (v=0) y la conexión analítica termina frenando hasta detenerse."""
         self._len, self._wid = veh.length, veh.width
         self.diag = veh.diag
         L = veh.wheelbase
         dmax = veh.delta_max
         sx, sy, sth = veh.inicio
         gx, gy = veh.meta
-        v_c = veh.v_max
+        self.v_max_c = veh.v_max
+        self.a_max = veh.a_max
+        self.v_rev = 0.5 * veh.v_max
 
-        # repertorio de acciones (velocidad con signo, dirección)
-        deltas = [-dmax, -dmax / 2, 0.0, dmax / 2, dmax]
-        acciones = [(0.0, 0.0)]                       # ESPERAR
-        for s in (v_c, 0.6 * v_c):                    # avanzar
-            acciones += [(s, d) for d in deltas]
-        for d in (-dmax, 0.0, dmax):                  # marcha atrás
-            acciones.append((-0.5 * v_c, d))
+        # Heurístico holonómico CON obstáculos (rejilla Dijkstra desde la meta):
+        # guía la búsqueda rodeando los obstáculos desde el principio → rutas más
+        # directas (evita el "ir recto y descubrir el obstáculo tarde").
+        self._construir_heuristica(gx, gy)
 
-        clave0 = self._clave(sx, sy, sth, 0)
-        contador = 0
-        h0 = math.hypot(sx - gx, sy - gy) / v_c
-        # cola: (f, contador, x, y, theta, k_fino, g)
-        abierto = [(self.peso_h * h0, contador, sx, sy, sth, 0, 0.0)]
+        # repertorio de acciones: (aceleración, dirección). La aceleración está
+        # acotada a ±a_max (o 0 = mantener velocidad); la dirección, a ±dmax.
+        # Direcciones FINAS cerca de 0 para poder corregir el rumbo suavemente
+        # desde el principio (evita el "ir recto y girar tarde").
+        a = self.a_max
+        deltas = [f * dmax for f in self.dir_fracs]
+        acciones = [(av, d) for av in (a, 0.0, -a) for d in deltas]
+
+        # El grafo de reconstrucción se indexa por ID ÚNICO de nodo (no por la
+        # clave discretizada). Así cada tramo arranca EXACTAMENTE donde acaba el
+        # de su padre → trayectoria continua, sin saltos de bucket ("teletransporte").
+        # La clave discretizada se usa solo para PODAR estados dominados.
+        clave0 = self._clave(sx, sy, sth, 0.0, 0)
+        nid = 0
+        padre_id = {}                     # nid -> nid del padre
+        arista_id = {}                    # nid -> poses densas del tramo hacia nid
+        delta_prev = {0: 0.0}             # nid -> dirección con la que se llegó
+        h0 = self._h_time(sx, sy)
+        # cola: (f, nid, x, y, theta, v, k_fino, g)
+        abierto = [(self.peso_h * h0, 0, sx, sy, sth, 0.0, 0, 0.0)]
         mejor_g = {clave0: 0.0}
-        padre = {}
-        arista = {}                       # clave -> poses densas del tramo (subpasos)
         expand = 0
         ns = self.subpasos
+        self._last_tick = time.perf_counter()
+        # motivo de parada; se afina al terminar. "limite" es el valor pesimista
+        # por defecto (si salimos por techo de expansiones o plazo opcional).
+        self.motivo = "limite"
 
         while abierto and expand < self.max_exp:
-            _f, _, x, y, th, k, g = heapq.heappop(abierto)
+            _f, cid, x, y, th, v, k, g = heapq.heappop(abierto)
             expand += 1
-            ck = self._clave(x, y, th, k)
+
+            # Con frecuencia: respeta el PLAZO OPCIONAL (por defecto None = sin
+            # límite de reloj) y refresca la UI —limitado por tiempo real— para
+            # que la ventana no se congele durante una búsqueda larga.
+            if (expand & 255) == 0:
+                now = time.perf_counter()
+                if self.deadline is not None and now > self.deadline:
+                    self.motivo = "limite"
+                    return None
+                if self.tick is not None and now - self._last_tick > 0.15:
+                    self._last_tick = now
+                    self.tick(expand)
 
             d_goal = math.hypot(x - gx, y - gy)
-            if d_goal <= self.goal_tol:
-                return self._reconstruir(padre, arista, ck, (sx, sy, sth))
+            if d_goal <= self.goal_tol and abs(v) <= self.v_tol:
+                # solo acepta si la plaza de aparcamiento queda libre para siempre
+                if self._aparcamiento_libre((x, y, th), k, reservas):
+                    self.motivo = "ok"
+                    return self._reconstruir(padre_id, arista_id, cid, (sx, sy, sth))
+                # si no, sigue buscando otra pose de llegada (dentro de goal_tol)
 
-            if d_goal <= self.dist_tiro:
-                tiro = self._tiro_directo(x, y, th, k, gx, gy, L, dmax, v_c, reservas)
-                if tiro is not None:
-                    base = self._reconstruir(padre, arista, ck, (sx, sy, sth))
-                    return base + tiro
+            elif d_goal <= self.dist_tiro:
+                # remata solo si ya apunta bien a la meta (o está muy cerca);
+                # así no genera un arco amplio desde una orientación mala.
+                alpha0 = math.atan2(gy - y, gx - x) - th
+                alpha0 = math.atan2(math.sin(alpha0), math.cos(alpha0))
+                if abs(alpha0) <= self.ang_tiro or d_goal <= self.goal_tol * 1.5:
+                    tiro = self._tiro_directo(x, y, th, v, k, gx, gy, L, dmax, reservas)
+                    if tiro is not None:
+                        kfin = k + len(tiro)
+                        if self._aparcamiento_libre(tiro[-1], kfin, reservas):
+                            base = self._reconstruir(padre_id, arista_id, cid,
+                                                     (sx, sy, sth))
+                            self.motivo = "ok"
+                            return base + tiro
 
             if k >= self.k_max:
                 continue
 
-            for speed, delta in acciones:
-                if speed == 0.0:                      # esperar: misma pose, ns subpasos
-                    subs = [(x, y, th)] * ns
-                else:
-                    subs = self._mover(x, y, th, speed, delta, L)
-                    if subs is None:
-                        continue
+            dprev = delta_prev.get(cid, 0.0)
+            for accel, delta in acciones:
+                subs, nv = self._mover(x, y, th, v, accel, delta, L)
+                if subs is None:
+                    continue
                 if not self._subs_libres_din(subs, k, reservas):
                     continue
                 nx, ny, nth = subs[-1]
                 nk = k + ns
-                ng = g + self.dt                      # coste = tiempo transcurrido
-                if speed < 0:
-                    ng += 0.6 * self.dt               # penaliza la marcha atrás
-                elif speed == 0.0:
-                    ng += 0.15 * self.dt              # leve penalización por esperar
-                ng += 0.05 * self.dt * abs(delta)     # suaviza el giro
-                key = self._clave(nx, ny, nth, nk)
+                # COSTE = TIEMPO. Ese es el objetivo real: una ruta más larga o
+                # con más rodeos acumula más pasos (más 'dt') y ya sale peor por sí
+                # sola. No se penaliza girar (un arco para bordear un obstáculo es
+                # tan válido como ir recto; lo que decide es el tiempo total).
+                ng = g + self.dt
+                if nv < 0:
+                    ng += 0.6 * self.dt               # marcha atrás: maniobra lenta/indeseada
+                if abs(nv) < 1e-3 and accel <= 0.0:
+                    ng += 0.20 * self.dt              # pararse sin motivo cuesta tiempo
+                # ε de CURVATURA (subordinado al tiempo): a igualdad de eficiencia,
+                # prefiere ir RECTO. Sin esto, una curva suave y una recta que
+                # avanzan lo mismo cuestan igual y la búsqueda trazaba curvas
+                # gratuitas donde bastaba la línea recta hasta el siguiente giro.
+                ng += 0.10 * self.dt * abs(delta) / dmax
+                # Desempate MENOR: evita el temblor de la rejilla discreta
+                # prefiriendo no cambiar bruscamente de dirección.
+                ng += 0.08 * self.dt * abs(delta - dprev)
+                key = self._clave(nx, ny, nth, nv, nk)
                 if ng < mejor_g.get(key, float("inf")):
                     mejor_g[key] = ng
-                    padre[key] = ck
-                    arista[key] = subs
-                    contador += 1
-                    h = math.hypot(nx - gx, ny - gy) / v_c
+                    nid += 1
+                    padre_id[nid] = cid
+                    arista_id[nid] = subs
+                    delta_prev[nid] = delta
+                    h = self._h_time(nx, ny)
                     heapq.heappush(abierto,
-                                   (ng + self.peso_h * h, contador, nx, ny, nth, nk, ng))
+                                   (ng + self.peso_h * h, nid, nx, ny, nth, nv, nk, ng))
+        # Salida del bucle: si la frontera quedó VACÍA, la búsqueda agotó todo el
+        # espacio alcanzable sin llegar a la meta → NO EXISTE ruta (respuesta
+        # definitiva). Si aún quedaban nodos, paró por el techo de expansiones →
+        # resultado INCONCLUSO (la búsqueda era demasiado grande para agotarla).
+        self.motivo = "sin_ruta" if not abierto else "limite"
         return None
 
-    def _reconstruir(self, padre, arista, ck, inicio):
+    def _reconstruir(self, padre_id, arista_id, cid, inicio):
         tramos = []
-        while ck in padre:
-            tramos.append(arista[ck])
-            ck = padre[ck]
+        while cid in padre_id:
+            tramos.append(arista_id[cid])
+            cid = padre_id[cid]
         tramos.reverse()
         traj = [(inicio[0], inicio[1], inicio[2])]
         for t in tramos:
@@ -498,10 +730,36 @@ class App:
         self.modo_manual = False
         self.colocando_inicio = True
         self.pend_inicio = None
+        self._ocupado = False      # evita reentrancia durante la planificación
+        self._plan_msg = ""        # texto de progreso durante la planificación
 
         self._construir_ui()
         self.env.generar(0.0)
         self._dibujar_estatico()
+
+    # --------------------------- blindaje --------------------------------- #
+    def _seguro(self, fn):
+        """Envuelve un callback de la UI para que NINGUNA combinación de
+        pulsaciones pueda colgar o romper la aplicación:
+          · ignora la acción si hay una planificación en curso (reentrancia),
+          · absorbe los errores de Tk cuando la ventana ya se cerró,
+          · y muestra cualquier excepción inesperada en un diálogo en vez de
+            propagarla (que abortaría el programa)."""
+        def envuelto(*args, **kwargs):
+            if self._ocupado:
+                return None
+            try:
+                return fn(*args, **kwargs)
+            except tk.TclError:
+                return None            # la ventana pudo destruirse a mitad
+            except Exception as e:     # noqa: BLE001 — red de seguridad global
+                try:
+                    messagebox.showerror("Error inesperado",
+                                         f"{type(e).__name__}: {e}")
+                except Exception:
+                    pass
+                return None
+        return envuelto
 
     # ------------------------------ UI ------------------------------------ #
     def _construir_ui(self):
@@ -514,10 +772,22 @@ class App:
         ttk.Label(panel, text="Parámetros", font=("", 13, "bold")).grid(
             row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
         self.e_num = self._campo(panel, 1, "Nº de vehículos:", "4")
-        self.e_len = self._campo(panel, 2, "Largo vehículo (m):", "2.6")
-        self.e_wid = self._campo(panel, 3, "Ancho vehículo (m):", "1.4")
-        self.e_vmax = self._campo(panel, 4, "Velocidad máx (m/s):", "5.0")
-        self.e_dens = self._campo(panel, 5, "Densidad obstáculos (0-1):", "0.0")
+        self.e_dens = self._campo(panel, 2, "Densidad obstáculos (0-1):", "0.0")
+
+        self.calidad = tk.IntVar(value=3)
+        self.calidad_txt = tk.StringVar()
+        # width fijo (en caracteres) + anchor w: la etiqueta reserva SIEMPRE el
+        # mismo ancho, así el panel no se reajusta al cambiar el nivel.
+        ttk.Label(panel, textvariable=self.calidad_txt, width=38,
+                  anchor="w").grid(
+            row=3, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        # tk.Scale (no ttk) para tener 5 PARADAS DISCRETAS y uniformes: resolution
+        # =1 hace que salte a enteros y tickinterval=1 marca las 5 posiciones.
+        tk.Scale(panel, from_=1, to=5, resolution=1, tickinterval=1,
+                 orient="horizontal", variable=self.calidad, showvalue=False,
+                 command=self._calidad_cambia).grid(
+            row=4, column=0, columnspan=2, sticky="ew")
+        self._calidad_cambia()
 
         ttk.Separator(panel, orient="horizontal").grid(
             row=6, column=0, columnspan=2, sticky="ew", pady=8)
@@ -530,10 +800,10 @@ class App:
                         variable=self.modo, value="manual").grid(
             row=9, column=0, columnspan=2, sticky="w")
         ttk.Button(panel, text="Generar posiciones",
-                   command=self.generar_posiciones).grid(
+                   command=self._seguro(self.generar_posiciones)).grid(
             row=10, column=0, columnspan=2, sticky="ew", pady=(6, 2))
         ttk.Button(panel, text="Nuevo mapa de obstáculos",
-                   command=self.nuevo_mapa).grid(
+                   command=self._seguro(self.nuevo_mapa)).grid(
             row=11, column=0, columnspan=2, sticky="ew", pady=2)
 
         ttk.Separator(panel, orient="horizontal").grid(
@@ -547,16 +817,16 @@ class App:
         ttk.Separator(panel, orient="horizontal").grid(
             row=15, column=0, columnspan=2, sticky="ew", pady=8)
         ttk.Button(panel, text="▶  Calcular y simular",
-                   command=self.calcular_y_simular).grid(
+                   command=self._seguro(self.calcular_y_simular)).grid(
             row=16, column=0, columnspan=2, sticky="ew", pady=2)
         ttk.Button(panel, text="↺  Reproducir de nuevo",
-                   command=self.reproducir).grid(
+                   command=self._seguro(self.reproducir)).grid(
             row=17, column=0, columnspan=2, sticky="ew", pady=2)
         ttk.Button(panel, text="⏸  Pausar / reanudar",
-                   command=self.pausar).grid(
+                   command=self._seguro(self.pausar)).grid(
             row=18, column=0, columnspan=2, sticky="ew", pady=2)
         ttk.Button(panel, text="⟲  Reiniciar",
-                   command=self.reiniciar).grid(
+                   command=self._seguro(self.reiniciar)).grid(
             row=19, column=0, columnspan=2, sticky="ew", pady=2)
         ttk.Button(panel, text="✕  Salir",
                    command=self.root.destroy).grid(
@@ -566,11 +836,14 @@ class App:
                                 bg=COL_FONDO, highlightthickness=2,
                                 highlightbackground=COL_BORDE)
         self.canvas.grid(row=0, column=1)
-        self.canvas.bind("<Button-1>", self.click_mapa)
+        self.canvas.bind("<Button-1>", self._seguro(self.click_mapa))
 
         self.estado = tk.StringVar(value="Listo. Ajusta parámetros y genera posiciones.")
+        # width=1 + sticky="ew": la etiqueta se ESTIRA para llenar el ancho ya
+        # fijado por (panel + lienzo) y recorta el texto sobrante, en vez de
+        # pedir más ancho y hacer crecer la ventana con los mensajes largos.
         ttk.Label(cont, textvariable=self.estado, relief="sunken",
-                  anchor="w", padding=4).grid(
+                  anchor="w", padding=4, width=1).grid(
             row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
 
     def _campo(self, panel, fila, etiqueta, valor):
@@ -581,24 +854,26 @@ class App:
         return e
 
     # --------------------------- parámetros ------------------------------- #
+    def _calidad_cambia(self, *_):
+        """Actualiza la etiqueta y aplica el nivel de calidad al planificador."""
+        nivel = int(round(float(self.calidad.get())))
+        # Solo el número (1..5), sin descriptores: así el texto NUNCA cambia de
+        # longitud/ancho al variar el nivel y el panel no se reajusta. La escala
+        # 1 = rápido … 5 = máxima calidad se explica en la etiqueta fija.
+        self.calidad_txt.set(f"Calidad de ruta (1 rápida ⟷ 5 máxima):  {nivel}")
+        self.planificador.configurar_calidad(nivel)
+
     def _params(self):
+        # Tamaño y velocidad de los vehículos: valores fijos (ya no editables).
+        length, width, vmax = VEH_LEN, VEH_WID, VEH_VMAX
         try:
             n = int(self.e_num.get())
-            length = float(self.e_len.get())
-            width = float(self.e_wid.get())
-            vmax = float(self.e_vmax.get())
             dens = float(self.e_dens.get())
         except ValueError:
             messagebox.showerror("Error", "Los parámetros deben ser numéricos.")
             return None
         if not (1 <= n <= len(PALETA)):
             messagebox.showerror("Error", f"Nº de vehículos entre 1 y {len(PALETA)}.")
-            return None
-        if not (1.0 <= length <= 8.0 and 0.8 <= width <= 4.0 and width < length):
-            messagebox.showerror("Error", "Tamaño irreal: largo 1-8 m, ancho 0.8-4 m, ancho<largo.")
-            return None
-        if not (0.5 <= vmax <= 20):
-            messagebox.showerror("Error", "Velocidad máx entre 0.5 y 20 m/s.")
             return None
         return n, length, width, vmax, max(0.0, min(1.0, dens))
 
@@ -689,10 +964,12 @@ class App:
         self.metas[veh.idx] = veh.meta
         return True
 
-    def _crear_vehiculos(self, length, width, vmax):
+    def _crear_vehiculos(self, length, width, vmax, n=None):
+        if n is None:
+            n = len(self.inicios)
         self.vehiculos = [
             Vehiculo(i, self.inicios[i], self.metas[i], length, width, vmax)
-            for i in range(len(self.inicios))]
+            for i in range(n)]
 
     # -------------------- colocación manual (clics) ----------------------- #
     def click_mapa(self, ev):
@@ -736,48 +1013,157 @@ class App:
         p = self._params()
         if not p:
             return
-        n = p[0]
-        if len(self.vehiculos) < n:
+        n, length, width, vmax, _ = p
+        if len(self.inicios) < n or len(self.metas) < n:
             messagebox.showinfo("Faltan posiciones",
                                 "Genera o coloca primero todas las posiciones.")
             return
 
         self._detener()
+        # Reconstruye los vehículos desde las posiciones FUENTE en CADA cálculo.
+        # Así, al cambiar la calidad (u otro parámetro) y pulsar de nuevo, se
+        # REPLANIFICA de verdad todo el conjunto original —incluidos los que
+        # fallaron en un intento previo— en vez de arrastrar las trayectorias ya
+        # calculadas o quedarse solo con los supervivientes del intento anterior.
+        self._crear_vehiculos(length, width, vmax, n)
+        self._ocupado = True
+        try:
+            self._planificar_todo(n)
+        finally:
+            self._ocupado = False
+
+    def _planificar_todo(self, n):
         self.estado.set("Planificando de forma cooperativa (Hybrid A* espacio-tiempo)…")
         self.root.update()
+        if not self.root.winfo_exists():
+            return
         aleatorio = self.modo.get() == "aleatorio"
 
         # Planificación cooperativa priorizada: el vehículo i evita (a) los
         # obstáculos fijos, (b) las metas de los vehículos POSTERIORES (bloqueos
         # estáticos, para no aparcar donde otro debe aparcar) y (c) las
         # TRAYECTORIAS temporales de los ANTERIORES (obstáculos móviles).
+        #
+        # SIN límite de reloj: cada búsqueda corre hasta CONCLUIR de verdad —
+        # encuentra ruta o agota la frontera (⇒ la ruta NO existe, definitivo).
+        # El único tope es un TECHO DE EXPANSIONES muy alto (nodos, no segundos)
+        # como red anti-cuelgue; si se alcanza, el resultado es INCONCLUSO (la
+        # búsqueda era demasiado grande), y así se informa —no se confunde con un
+        # "no existe". La UI se refresca periódicamente para no congelarse.
+        CAP_COMPLETO = 6_000_000                  # techo de nodos (anti-cuelgue)
         reservas = Reservas()
-        for i, veh in enumerate(self.vehiculos):
-            self.planificador.bloqueos = self._bloqueos_metas(excepto=i)
-            traj = self.planificador.planificar(veh, reservas)
-            intentos = 0
-            while (traj is None or len(traj) < 2) and aleatorio and intentos < 12:
-                if not self._reubicar(veh):
-                    break
-                self.planificador.bloqueos = self._bloqueos_metas(excepto=i)
-                traj = self.planificador.planificar(veh, reservas)
-                intentos += 1
-            if traj is None or len(traj) < 2:
-                messagebox.showwarning("Sin ruta",
-                    f"No se encontró ruta coordinada para el vehículo {veh.idx + 1}.\n"
-                    "Prueba otras posiciones, menos vehículos/obstáculos o uno más pequeño.")
-                return
-            veh.traj = traj
-            veh.dt_plan = self.planificador.dt / self.planificador.subpasos
-            reservas.add(traj, veh.length, veh.width)
-            self.estado.set(f"Planificado vehículo {i + 1}/{n}…")
-            self.root.update()
+        planificados = []                        # vehículos con ruta válida
+        sin_ruta = 0                             # no existe ruta (definitivo)
+        inconcluso = 0                           # búsqueda no agotada (techo)
+        self.planificador.tick = self._tick_plan
+        self.planificador.deadline = None        # sin plazo de reloj
+        cap_prev = self.planificador.max_exp
+        self.planificador.max_exp = CAP_COMPLETO
+        try:
+            for i, veh in enumerate(self.vehiculos):
+                self._plan_msg = f"Planificando vehículo {i + 1}/{n}…"
+                self.estado.set(self._plan_msg)
+                self.root.update()
+                if not self.root.winfo_exists():
+                    return
+                motivo, traj = self._planificar_veh(veh, reservas, i, aleatorio)
+                if motivo != "ok":
+                    # No se pudo con este vehículo: se EXCLUYE y se sigue con el
+                    # resto (los mostrados siguen siendo mutuamente sin colisión,
+                    # pues cada uno evita a todos los anteriores YA reservados).
+                    veh.traj = []
+                    if motivo == "sin_ruta":
+                        sin_ruta += 1
+                    else:
+                        inconcluso += 1
+                else:
+                    veh.traj = traj
+                    veh.dt_plan = DT
+                    reservas.add(traj, veh.length, veh.width)
+                    planificados.append(veh)
+                if not self.root.winfo_exists():
+                    return
+        finally:
+            self.planificador.tick = None
+            self.planificador.deadline = None
+            self.planificador.max_exp = cap_prev
+
+        # Solo se simulan/dibujan los vehículos con ruta (nada de coches fantasma
+        # estáticos que otros pudieran atravesar). NO se tocan self.inicios /
+        # self.metas (posiciones FUENTE): así un recálculo posterior reintenta el
+        # conjunto ORIGINAL completo. El dibujo colorea por veh.idx (identidad
+        # estable = índice en la fuente), de modo que cada coche conserva SU color
+        # aunque otros queden excluidos.
+        self.vehiculos = planificados
         self._dibujar_estatico()
+        if not planificados:
+            if inconcluso:
+                messagebox.showwarning("Búsqueda inconclusa",
+                    "No se agotó la búsqueda dentro del techo de nodos: el "
+                    "resultado es INCONCLUSO (podría existir ruta, pero el "
+                    "espacio de búsqueda era demasiado grande).\nSube la "
+                    "«Calidad de ruta», usa menos vehículos/obstáculos o cambia "
+                    "las posiciones.")
+            else:
+                messagebox.showwarning("Sin ruta",
+                    "No existe ruta para ningún vehículo: la búsqueda agotó todo "
+                    "el espacio alcanzable sin llegar a la meta.\nLas posiciones "
+                    "elegidas no tienen solución en este mapa.")
+            self.estado.set("Sin rutas. Ajusta parámetros y reintenta.")
+            return
 
         self.frames = construir_frames(self.vehiculos)
-        self.estado.set(f"Rutas coordinadas ({len(self.frames)} fotogramas). "
-                        f"Todos llegan sin colisiones. Reproduciendo…")
+        avisos = []
+        if sin_ruta:
+            avisos.append(f"{sin_ruta} sin ruta (no existe)")
+        if inconcluso:
+            avisos.append(f"{inconcluso} inconcluso (techo de búsqueda)")
+        aviso = f"  ⚠ {'; '.join(avisos)}" if avisos else ""
+        self.estado.set(f"{len(planificados)} rutas sin colisiones "
+                        f"({len(self.frames)} fotogramas).{aviso}  Reproduciendo…")
         self.reproducir()
+
+    def _planificar_veh(self, veh, reservas, i, aleatorio):
+        """Planifica UN vehículo hasta una CONCLUSIÓN real (sin límite de reloj).
+        Devuelve (motivo, traj):
+          · ("ok", traj)        → ruta encontrada;
+          · ("sin_ruta", None)  → la frontera de búsqueda se agotó: NO existe
+                                   ruta para estos extremos (respuesta definitiva);
+          · ("limite", None)    → se alcanzó el techo de expansiones: resultado
+                                   INCONCLUSO (la búsqueda era demasiado grande).
+        En modo aleatorio, ante un "sin_ruta" definitivo prueba a reubicar los
+        extremos (quizá otras posiciones sí sean factibles); un "limite" NO se
+        reubica (no sabemos si había ruta, reubicar solo escondería el problema).
+        La calidad la fija el usuario y NO se altera aquí."""
+        self.planificador.bloqueos = self._bloqueos_metas(excepto=i)
+        traj = self.planificador.planificar(veh, reservas)
+        motivo = self.planificador.motivo
+        intentos = 0
+        while (motivo == "sin_ruta" and aleatorio and intentos < 12):
+            if not self._reubicar(veh):
+                break
+            self.planificador.bloqueos = self._bloqueos_metas(excepto=i)
+            traj = self.planificador.planificar(veh, reservas)
+            motivo = self.planificador.motivo
+            intentos += 1
+        if traj is not None and len(traj) >= 2:
+            return "ok", traj
+        if traj:                       # traj de 1 sola pose: el coche YA está en
+            # su meta (inicio dentro de la tolerancia). Es un éxito trivial; se
+            # devuelve una trayectoria válida (queda parado) para no romper el
+            # muestreo de fotogramas ni las reservas.
+            return "ok", [traj[0], traj[0]]
+        # Sin trayectoria utilizable: NUNCA devolver "ok" (evita meter None en
+        # las reservas). Si el planificador dijo "ok" pero no hay traj, es un
+        # fallo efectivo → se reporta como sin_ruta.
+        return (motivo if motivo != "ok" else "sin_ruta"), None
+
+    def _tick_plan(self, expand):
+        """Progreso periódico durante la búsqueda: refresca la ventana (para que
+        no se congele) y muestra las expansiones. El guard _ocupado impide que
+        cualquier pulsación reentrante afecte al cálculo."""
+        self.estado.set(f"{self._plan_msg}  ({expand:,} nodos explorados)")
+        self.root.update()
 
     def _bloqueos_metas(self, excepto):
         """OBB cuadrados (independientes de la orientación) en las metas de los
@@ -802,15 +1188,21 @@ class App:
         self._anim()
 
     def _anim(self):
-        if not self.reproduciendo:
+        if not self.reproduciendo or not self.frames:
             return
-        self._dibujar_frame()
-        if self.frame >= len(self.frames) - 1:
+        try:
+            if not self.root.winfo_exists():
+                return
+            self.frame = max(0, min(self.frame, len(self.frames) - 1))
+            self._dibujar_frame()
+            if self.frame >= len(self.frames) - 1:
+                self.reproduciendo = False
+                self.estado.set("Reproducción finalizada.")
+                return
+            self.frame += 1
+            self.anim_id = self.root.after(int(self.vel.get()), self._anim)
+        except tk.TclError:
             self.reproduciendo = False
-            self.estado.set("Reproducción finalizada.")
-            return
-        self.frame += 1
-        self.anim_id = self.root.after(int(self.vel.get()), self._anim)
 
     def pausar(self):
         if not self.frames:
@@ -860,16 +1252,17 @@ class App:
                           font=("", 13, "bold"))
         for i, ini in enumerate(self.inicios):
             col = PALETA[i % len(PALETA)]
-            length = self.vehiculos[i].length if i < len(self.vehiculos) else 4.0
-            width = self.vehiculos[i].width if i < len(self.vehiculos) else 2.0
-            poly = obb_corners(ini[0], ini[1], ini[2], length, width)
+            # dimensiones FIJAS de vehículo (constantes): así el OBB de inicio no
+            # depende de self.vehiculos[i] —que puede no existir tras excluir a un
+            # fallido— y nunca aparece el rectángulo enorme del antiguo fallback.
+            poly = obb_corners(ini[0], ini[1], ini[2], VEH_LEN, VEH_WID)
             c.create_polygon(self._poly_px(poly), outline=col, fill="",
                              width=1, dash=(3, 3))
 
     def _rutas(self):
-        for i, veh in enumerate(self.vehiculos):
+        for veh in self.vehiculos:
             if veh.traj:
-                col = PALETA[i % len(PALETA)]
+                col = PALETA[veh.idx % len(PALETA)]
                 pts = []
                 for x, y, _ in veh.traj:
                     pts.extend((x * SCALE, y * SCALE))
@@ -877,18 +1270,19 @@ class App:
 
     def _dibujar_estatico(self):
         self._fondo()
-        for i, veh in enumerate(self.vehiculos):
+        for veh in self.vehiculos:
             self._dibujar_coche(veh.inicio[0], veh.inicio[1], veh.inicio[2],
-                                veh.length, veh.width, PALETA[i % len(PALETA)], i + 1)
+                                veh.length, veh.width,
+                                PALETA[veh.idx % len(PALETA)], veh.idx + 1)
 
     def _dibujar_frame(self):
         self._fondo()
         self._rutas()
         fr = self.frames[self.frame]
-        for i, veh in enumerate(self.vehiculos):
+        for veh in self.vehiculos:
             x, y, th = fr[veh.idx]
             self._dibujar_coche(x, y, th, veh.length, veh.width,
-                                PALETA[i % len(PALETA)], i + 1)
+                                PALETA[veh.idx % len(PALETA)], veh.idx + 1)
         self.canvas.create_text(10, 12, anchor="w",
                                 text=f"t = {self.frame * DT:.1f} s   "
                                      f"({self.frame}/{len(self.frames) - 1})",
