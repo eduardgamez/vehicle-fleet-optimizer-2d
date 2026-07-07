@@ -1596,7 +1596,7 @@ class App:
         ttk.Label(panel, text="Optimización de flota", font=("", 11, "bold")).grid(
             row=fila[0], column=0, columnspan=2, sticky="w")
         fila[0] += 1
-        self.opt = tk.StringVar(value="global")
+        self.opt = tk.StringVar(value="secuencial")
         for txt, val in (("Global (explora órdenes, mejor total)", "global"),
                          ("Prioridades personalizadas", "prioridades"),
                          ("Secuencial (grupo+prioridad, sin explorar)", "secuencial")):
@@ -1618,15 +1618,7 @@ class App:
                 row=fila[0], column=0, columnspan=2, sticky="ew", pady=1)
             fila[0] += 1
 
-        sep()
-        ttk.Label(panel, text="Velocidad de reproducción").grid(
-            row=fila[0], column=0, columnspan=2, sticky="w")
-        fila[0] += 1
-        self.vel = tk.IntVar(value=40)
-        ttk.Scale(panel, from_=160, to=8, variable=self.vel,
-                  orient="horizontal").grid(row=fila[0], column=0,
-                                            columnspan=2, sticky="ew")
-        fila[0] += 1
+
 
         sep()
         for txt, cmd in (("▶  Calcular y simular", self.calcular_y_simular),
@@ -1645,6 +1637,9 @@ class App:
                                 bg=COL_FONDO, highlightthickness=2,
                                 highlightbackground=COL_BORDE)
         self.canvas.grid(row=0, column=1)
+        self.canvas.bind("<Motion>", self._on_canvas_motion)
+        self.canvas.bind("<Leave>", self._on_canvas_leave)
+        self._cursor_info = None
 
         caja = ttk.Frame(cont)
         caja.grid(row=1, column=1, sticky="nsew", pady=(6, 0))
@@ -1674,6 +1669,39 @@ class App:
         nivel = int(round(float(self.calidad.get())))
         self.calidad_txt.set(f"Calidad de ruta (1 rápida ⟷ 5 máxima):  {nivel}")
         self.planificador.configurar_calidad(nivel)
+
+    def _on_canvas_motion(self, ev):
+        x_m = ev.x / SCALE
+        y_m = ev.y / SCALE
+        texto = f"x: {x_m:.1f}, y: {y_m:.1f}"
+        
+        tx = ev.x + 12
+        ty = ev.y + 12
+        if ev.x > (W * SCALE) - 90:
+            tx = ev.x - 80
+        if ev.y > (H * SCALE) - 30:
+            ty = ev.y - 20
+        
+        if self._cursor_info is None:
+            rect = self.canvas.create_rectangle(0, 0, 1, 1, fill="white", outline="black", tags="tooltip")
+            txt = self.canvas.create_text(tx, ty, text=texto, fill="black", anchor="nw", font=("", 8), tags="tooltip")
+            self._cursor_info = (rect, txt)
+        else:
+            rect, txt = self._cursor_info
+            self.canvas.itemconfigure(txt, text=texto)
+            self.canvas.coords(txt, tx, ty)
+            self.canvas.tag_raise(rect)
+            self.canvas.tag_raise(txt)
+            
+        rect, txt = self._cursor_info
+        bbox = self.canvas.bbox(txt)
+        if bbox:
+            self.canvas.coords(rect, bbox[0]-2, bbox[1]-1, bbox[2]+2, bbox[3]+1)
+
+    def _on_canvas_leave(self, ev):
+        if self._cursor_info is not None:
+            self.canvas.delete("tooltip")
+            self._cursor_info = None
 
     def _params(self):
         from tkinter import messagebox
@@ -1858,11 +1886,9 @@ class App:
         return None
 
     def _angulo_llegada(self, ix, iy, mx, my, length, width):
-        """Ángulo de llegada CONCRETO para la plaza (mx, my): primero la dirección
-        natural inicio→meta; si la plaza no cabe así, ángulos al azar. None si
-        ninguna orientación cabe (plaza imposible)."""
-        thm = math.atan2(my - iy, mx - ix)
-        candidatos = [thm] + [random.uniform(0, 2 * math.pi) for _ in range(24)]
+        """Ángulo de llegada CONCRETO y totalmente al azar para la plaza (mx, my).
+        None si ninguna de las orientaciones al azar cabe."""
+        candidatos = [random.uniform(0, 2 * math.pi) for _ in range(25)]
         for c in candidatos:
             if self.env.libre(mx, my, c, length, width, margen=0.25):
                 return c
@@ -1886,9 +1912,7 @@ class App:
             ix, iy, ith = ini
             mx, my, _ = met
             thm = self._angulo_llegada(ix, iy, mx, my, largo, ancho)
-            th0 = math.atan2(my - iy, mx - ix)
-            if not self.env.libre(ix, iy, th0, largo, ancho, margen=0.3):
-                th0 = ith
+            th0 = ith
             especs.append({
                 "id": i + 1,
                 "inicio": (round(ix, 2), round(iy, 2)),
@@ -1919,9 +1943,7 @@ class App:
             return False
         ix, iy, ith = ini
         thm = self._angulo_llegada(ix, iy, met[0], met[1], veh.length, veh.width)
-        th0 = math.atan2(met[1] - iy, met[0] - ix)
-        if not self.env.libre(ix, iy, th0, veh.length, veh.width, margen=0.3):
-            th0 = ith
+        th0 = ith
         veh.inicio = (ix, iy, th0)
         veh.meta = (met[0], met[1])
         veh.meta_th = thm
@@ -2253,7 +2275,7 @@ class App:
                                 "nuevas en el texto y pulsar «Nuevas rutas».")
                 return
             self.frame += 1
-            self.anim_id = self.root.after(int(self.vel.get()), self._anim)
+            self.anim_id = self.root.after(40, self._anim)
         except self.tk.TclError:
             self.reproduciendo = False
 
