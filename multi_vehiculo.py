@@ -254,6 +254,11 @@ def _k_tiro(x, y, th, v, k, gx, gy, L, dmax, ld, vmaxc, amax, goal_tol, v_tol, h
     Devuelve (n, poses): n>=0 → éxito con n poses en poses[:n]; n<0 → sin remate.
     Un tope de longitud descarta los rizos que se enroscan sin encarar la meta.
 
+    Valida cada paso igual que la búsqueda: muros y metas ajenas (_k_free_sb),
+    los demás vehículos en el instante correcto (_k_hits_dyn) y, al final, que la
+    plaza quede libre para siempre (se comprueba fuera con _k_aparca). Es decir,
+    el remate es tan seguro frente a colisiones como el propio A*.
+
     'ld' es la distancia de anticipación (lookahead) del pure-pursuit, acotada:
     corta → corrige el rumbo con firmeza al inicio del remate y luego avanza en
     recta hasta la meta (en vez de un arco amplio y poco pronunciado)."""
@@ -499,7 +504,9 @@ class Planificador:
         self.res_v = 0.5
         self.dt = 0.4
         self.subpasos = 4
-        self.goal_tol = 1.6
+        self.goal_tol = 1.6           # tolerancia GRUESA: dispara/acepta el remate
+        self.goal_tol_fin = 0.20      # tolerancia FINA: el piloto conduce hasta aquí
+        #                              (para no quedarse parado a un paso de la meta)
         self.v_tol = 0.45
         self.k_max = 1600
         self.dist_tiro = 10.0
@@ -776,24 +783,16 @@ class Planificador:
                     self.tick(expand)
 
             d_goal = math.hypot(x - gx, y - gy)
-            if d_goal <= self.goal_tol and abs(v) <= self.v_tol:
-                # Solo acepta si la plaza de aparcamiento queda libre para siempre.
-                Ld = self._len + 2.0 * self.margen_din
-                Wd = self._wid + 2.0 * self.margen_din
-                kfin = k if k > res_maxlen else res_maxlen
-                if _k_aparca(x, y, th, k, kfin, Ld, Wd,
-                             rx, roff, rlen, rlw, R, self.diag, self.margen_din):
-                    self.motivo = "ok"
-                    return self._reconstruir(padre_id, arista_id, cid, (sx, sy, sth))
-
-            elif d_goal <= self.dist_tiro:
-                # Remata solo si ya apunta bien a la meta (o está muy cerca), para
-                # no trazar un arco amplio desde una orientación mala.
+            if d_goal <= self.dist_tiro:
+                # Se intenta PRIMERO conducir hasta el punto exacto (tolerancia
+                # fina) con el piloto: así no se acepta un nodo que se queda parado a
+                # un paso de la meta. Remata solo si ya apunta bien (o está muy
+                # cerca), para no trazar un arco amplio desde una orientación mala.
                 alpha0 = math.atan2(gy - y, gx - x) - th
                 alpha0 = math.atan2(math.sin(alpha0), math.cos(alpha0))
                 if abs(alpha0) <= self.ang_tiro or d_goal <= self.goal_tol * 1.5:
                     n, poses = _k_tiro(x, y, th, v, k, gx, gy, L, dmax, self.ld_tiro,
-                                       self.v_max_c, self.a_max, self.goal_tol,
+                                       self.v_max_c, self.a_max, self.goal_tol_fin,
                                        self.v_tol, h, self._len, self._wid,
                                        self.margen, self.margen_din, self.diag,
                                        W, H, oc, oax, obb, K, blc, blax, blbb, B,
@@ -811,6 +810,17 @@ class Planificador:
                                                      (sx, sy, sth))
                             self.motivo = "ok"
                             return base + tiro
+
+            # Respaldo: ya está dentro de la tolerancia gruesa y casi parado (el
+            # remate no aportó o no era viable) → acepta aquí si la plaza queda libre.
+            if d_goal <= self.goal_tol and abs(v) <= self.v_tol:
+                Ld = self._len + 2.0 * self.margen_din
+                Wd = self._wid + 2.0 * self.margen_din
+                kfin = k if k > res_maxlen else res_maxlen
+                if _k_aparca(x, y, th, k, kfin, Ld, Wd,
+                             rx, roff, rlen, rlw, R, self.diag, self.margen_din):
+                    self.motivo = "ok"
+                    return self._reconstruir(padre_id, arista_id, cid, (sx, sy, sth))
 
             if k >= self.k_max:
                 continue
