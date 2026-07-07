@@ -1,4 +1,4 @@
-# Optimizador de flotas — `flota_global.py`
+# Optimizador de flotas 2D
 
 Simulador de una flota de vehículos que deben ir cada uno de un punto a otro de
 un mapa con obstáculos, **sin chocar entre ellos ni con nada**, con física
