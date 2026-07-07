@@ -138,8 +138,7 @@ importado que esté en pantalla.
 - **Densidad de obstáculos** — obstáculos extra en el mapa aleatorio. Se
   deshabilita automáticamente cuando el mapa proviene de una imagen (ahí no
   tiene sentido).
-- **Velocidad de reproducción**, **Reproducir**, **Pausar/Reanudar**,
-  **Reiniciar** — controlan la animación.
+- **Reproducir**, **Pausar/Reanudar**, **Reiniciar** — controlan la animación.
 
 ## Instalación
 
