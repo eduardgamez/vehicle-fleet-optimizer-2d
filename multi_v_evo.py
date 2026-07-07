@@ -1508,10 +1508,6 @@ class App:
         self.reproduciendo = False
         self._warmed = False
 
-        self.modo_manual = False
-        self.colocando_inicio = True
-        self.pend_inicio = None
-        self._man_marcas = []
         self._ocupado = False
         self._plan_msg = ""
         self._veh_actual = 0          # vehículo cuya búsqueda se está dibujando
@@ -1586,8 +1582,7 @@ class App:
         fila[0] += 1
         self.modo = tk.StringVar(value="aleatorio")
         for txt, val in (("Aleatorios (todo al azar)", "aleatorio"),
-                         ("Personalizados (texto inferior)", "personalizado"),
-                         ("Manuales (clic: inicio → destino)", "manual")):
+                         ("Manuales (caja de texto inferior)", "manual")):
             ttk.Radiobutton(panel, text=txt, variable=self.modo,
                             value=val).grid(row=fila[0], column=0,
                                             columnspan=2, sticky="w")
@@ -1650,11 +1645,10 @@ class App:
                                 bg=COL_FONDO, highlightthickness=2,
                                 highlightbackground=COL_BORDE)
         self.canvas.grid(row=0, column=1)
-        self.canvas.bind("<Button-1>", self._seguro(self.click_mapa))
 
         caja = ttk.Frame(cont)
         caja.grid(row=1, column=1, sticky="nsew", pady=(6, 0))
-        ttk.Label(caja, text="Vehículos personalizados / nuevas rutas "
+        ttk.Label(caja, text="Vehículos manuales / nuevas rutas "
                              "(lista de diccionarios; ángulos en grados):").grid(
             row=0, column=0, sticky="w")
         self.texto = tk.Text(caja, height=8, width=int(W * SCALE / 8),
@@ -1714,7 +1708,6 @@ class App:
         self._detener()
         self.vehiculos, self.frames = [], []
         self.frame = 0
-        self.modo_manual = False
         self._actualizar_densidad()
         self.estado.set(msg)
         self._dibujar_estatico()
@@ -1813,19 +1806,7 @@ class App:
         self.frame = 0
         modo = self.modo.get()
 
-        if modo == "manual":
-            self.modo_manual = True
-            self.colocando_inicio = True
-            self.pend_inicio = None
-            self._man_marcas = []
-            self.vehiculos = []
-            self._cfg_n = n
-            self.estado.set("MANUAL · Clic para el INICIO del vehículo 1.")
-            self._dibujar_estatico()
-            return
-
-        self.modo_manual = False
-        if modo == "personalizado":
+        if modo in ("manual", "personalizado"):
             try:
                 especs = parsear_especificaciones(self.texto.get("1.0", "end"))
                 self.vehiculos = [espec_a_vehiculo(e, i, self.env)
@@ -1838,14 +1819,14 @@ class App:
                                      f"Máximo {len(PALETA)} vehículos.")
                 self.vehiculos = []
                 return
-            self.estado.set(f"{len(self.vehiculos)} vehículos personalizados "
+            self.estado.set(f"{len(self.vehiculos)} vehículos manuales "
                             "cargados. Pulsa «Calcular y simular».")
             self._dibujar_estatico()
             return
 
         # ALEATORIO: se genera una lista de diccionarios de longitud n (con TODO
         # al azar), se vuelca al cuadro de texto y se crean los vehículos a partir
-        # de ese texto — el mismo camino que el modo personalizado. Así el usuario
+        # de ese texto — el mismo camino que el modo manual. Así el usuario
         # ve y puede editar los vehículos generados.
         especs = self._aleatorios_spec(n)
         if especs is None:
@@ -1946,52 +1927,14 @@ class App:
         veh.meta_th = thm
         return True
 
-    def click_mapa(self, ev):
-        if not self.modo_manual:
-            return
-        n = self._cfg_n
-        largo, ancho = VEH_LEN, VEH_WID
-        x, y = ev.x / SCALE, ev.y / SCALE
 
-        if self.colocando_inicio:
-            if not self.env.libre(x, y, 0.0, largo, ancho, margen=0.2):
-                self.estado.set("Inicio inválido (fuera o sobre obstáculo). Otro punto.")
-                return
-            self.pend_inicio = (x, y)
-            self.colocando_inicio = False
-            self.estado.set(f"MANUAL · Clic para el DESTINO del vehículo "
-                            f"{len(self.vehiculos) + 1}.")
-            self._marca(x, y, PALETA[len(self.vehiculos) % len(PALETA)])
-        else:
-            if not self.env.libre(x, y, 0.0, largo, ancho, margen=0.2):
-                self.estado.set("Destino inválido. Elige otro punto.")
-                return
-            ix, iy = self.pend_inicio
-            i = len(self.vehiculos)
-            thm = self._angulo_llegada(ix, iy, x, y, largo, ancho)
-            self.vehiculos.append(Vehiculo(
-                i, (ix, iy, math.atan2(y - iy, x - ix)), (x, y),
-                meta_th=thm, vid=i + 1))
-            self.colocando_inicio = True
-            if len(self.vehiculos) >= n:
-                self.modo_manual = False
-                self.estado.set(f"{n} vehículos colocados. Pulsa «Calcular y simular».")
-            else:
-                self.estado.set(f"MANUAL · Clic para el INICIO del vehículo "
-                                f"{len(self.vehiculos) + 1}.")
-            self._dibujar_estatico()
-
-    def _marca(self, x, y, col):
-        r = 4
-        self.canvas.create_oval(x * SCALE - r, y * SCALE - r,
-                                x * SCALE + r, y * SCALE + r, fill=col, outline="")
 
     # --------------------------- planificación --------------------------- #
     def calcular_y_simular(self):
         from tkinter import messagebox
-        if not self.vehiculos or self.modo_manual:
+        if not self.vehiculos:
             messagebox.showinfo("Faltan vehículos",
-                                "Genera o coloca primero todos los vehículos.")
+                                "Genera o carga primero todos los vehículos.")
             return
         self._detener()
         for v in self.vehiculos:

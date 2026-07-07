@@ -1,10 +1,9 @@
-# Optimizador de flotas 2D
+# Optimizador de flotas 2D [WIP]
 
 Simulador de una flota de vehículos que deben ir cada uno de un punto a otro de
-un mapa con obstáculos, **sin chocar entre ellos ni con nada**, con física
-realista (los coches aceleran, frenan y giran con un radio mínimo, como un
-coche de verdad). El programa calcula las rutas, las coordina en el tiempo y
-las reproduce animadas.
+un mapa con obstáculos, **sin chocar entre ellos ni con obstáculos**, con física
+realista. El programa calcula las rutas, las coordina en el tiempo y
+las puede reproducir.
 
 Ejecutar:
 
@@ -12,24 +11,9 @@ Ejecutar:
 python3 multi_v_evo.py
 ```
 
-## Instalación
+El archivo `multi_vehiculo.py` incluido es una versión reducida. Carece de características avanzadas como importar mapas desde imágenes, modos de optimización por prioridades, ángulos de llegada específicos y reasignación de misiones en caliente.
 
-Librerías necesarias: `numpy`, `numba` (y `pillow` opcional, para importar
-imágenes JPG/BMP como mapas; sin él se admiten PNG/GIF/PPM).
-
-```bash
-pip install numpy numba pillow
-```
-
-En Linux además hace falta tkinter:
-
-```bash
-sudo apt install python3-tk      # Debian/Ubuntu
-sudo dnf install python3-tkinter # Fedora
-sudo pacman -S tk                # Arch
-```
-
-## Cómo funciona por dentro (en corto)
+## Cómo funciona por dentro (resumen)
 
 - Cada vehículo se mueve con el **modelo de bicicleta**: no puede girar sobre
   sí mismo, tiene un radio de giro mínimo, y su velocidad y aceleración están
@@ -45,7 +29,7 @@ sudo pacman -S tk                # Arch
   que el cálculo es rápido (la primera ejecución tarda un poco más por la
   compilación; luego queda en caché).
 
-## Los tres modos de optimización
+## Los tres modos de priorización
 
 El orden en que se planifican los vehículos importa: el primero elige ruta a
 sus anchas y los demás se van adaptando. El panel «Optimización de flota»
@@ -76,14 +60,14 @@ permite elegir cómo se decide ese orden:
 En cualquier modo, si algún vehículo se queda sin ruta, al final se le hace un
 «rescate» con búsqueda exhaustiva.
 
-## Los tres modos de vehículos
+## Los dos modos de vehículos
 
 - **Aleatorios** — se genera una **lista de N diccionarios** con todo al azar
   (tamaño, velocidad, aceleración, capacidad de giro, punto inicial, destino,
   ángulo de llegada, grupo y prioridad), se **vuelca en la caja de texto** y a
   partir de ahí se crean los vehículos. Como queda escrita, puedes revisarla y
   editar cualquier valor antes de simular. N es el «Nº de vehículos».
-- **Personalizados** — se definen en la caja de texto inferior como una
+- **Manuales** — se definen en la caja de texto inferior como una
   **lista de diccionarios**, uno por vehículo (ángulos en grados):
 
   ```python
@@ -94,31 +78,16 @@ En cualquier modo, si algún vehículo se queda sin ruta, al final se le hace un
    {"id": 2, "inicio": (36, 3), "meta": (4, 20), "grupo": 2, "prioridad": 1},
   ]
   ```
-
-  | Clave | Significado |
-  |---|---|
-  | `id` | identificador del vehículo (necesario para darle misiones nuevas) |
-  | `inicio` | punto inicial `(x, y)` en metros (el mundo mide 40 × 24 m) |
-  | `giro_inicial` | orientación inicial en grados (si falta: mirando a la meta) |
-  | `meta` | punto destino `(x, y)` |
-  | `angulo_llegada` | ángulo exigido al llegar, en grados; `"libre"` lo desactiva |
-  | `largo`, `ancho` | tamaño del vehículo en metros |
-  | `v_max`, `a_max` | velocidad (m/s) y aceleración (m/s²) máximas |
-  | `giro_max` | ángulo máximo de dirección en grados (capacidad de giro) |
-  | `grupo` | grupo de prioridad (entero); menor = se planifica antes |
-  | `prioridad` | prioridad dentro del grupo (entero); menor = antes; igual = global |
-
+  
   Todas las claves salvo `inicio` y `meta` son opcionales y tienen valores por
   defecto razonables.
-- **Manuales** — se colocan con el ratón: un clic para el inicio y otro para el
-  destino de cada vehículo.
 
 ## Ángulo de llegada
 
 No basta con llegar al destino: el vehículo debe llegar **orientado con un
 ángulo concreto** (como aparcar mirando hacia una dirección). En el mapa se
 dibuja una flecha en cada destino con el ángulo exigido. En modo aleatorio el
-ángulo se sortea; en modo personalizado lo fija `angulo_llegada` (y si se
+ángulo se sortea; en modo manual lo fija `angulo_llegada` (y si se
 omite, se usa la dirección natural inicio→meta). Con `"angulo_llegada":
 "libre"` la orientación final queda libre.
 
@@ -165,3 +134,20 @@ importado que esté en pantalla.
   tiene sentido).
 - **Velocidad de reproducción**, **Reproducir**, **Pausar/Reanudar**,
   **Reiniciar** — controlan la animación.
+
+## Instalación
+
+Librerías necesarias: `numpy`, `numba` (y `pillow` opcional, para importar
+imágenes JPG/BMP como mapas; sin él se admiten PNG/GIF/PPM).
+
+```bash
+pip install numpy numba pillow
+```
+
+En Linux además hace falta tkinter:
+
+```bash
+sudo apt install python3-tk      # Debian/Ubuntu
+sudo dnf install python3-tkinter # Fedora
+sudo pacman -S tk                # Arch
+```

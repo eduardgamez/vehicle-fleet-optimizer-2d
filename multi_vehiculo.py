@@ -940,9 +940,6 @@ class App:
         self.reproduciendo = False
         self._warmed = False
 
-        self.modo_manual = False
-        self.colocando_inicio = True
-        self.pend_inicio = None
         self._ocupado = False
         self._plan_msg = ""
 
@@ -1004,9 +1001,7 @@ class App:
         self.modo = tk.StringVar(value="aleatorio")
         ttk.Radiobutton(panel, text="Aleatorias", variable=self.modo,
                         value="aleatorio").grid(row=8, column=0, columnspan=2, sticky="w")
-        ttk.Radiobutton(panel, text="Manuales (clic: inicio → destino)",
-                        variable=self.modo, value="manual").grid(
-            row=9, column=0, columnspan=2, sticky="w")
+
         ttk.Button(panel, text="Generar posiciones",
                    command=self._seguro(self.generar_posiciones)).grid(
             row=10, column=0, columnspan=2, sticky="ew", pady=(6, 2))
@@ -1044,7 +1039,6 @@ class App:
                                 bg=COL_FONDO, highlightthickness=2,
                                 highlightbackground=COL_BORDE)
         self.canvas.grid(row=0, column=1)
-        self.canvas.bind("<Button-1>", self._seguro(self.click_mapa))
 
         self.estado = tk.StringVar(value="Listo. Ajusta parámetros y genera posiciones.")
         ttk.Label(cont, textvariable=self.estado, relief="sunken",
@@ -1097,17 +1091,6 @@ class App:
         self.frames = []
         self.frame = 0
 
-        if self.modo.get() == "manual":
-            self.modo_manual = True
-            self.colocando_inicio = True
-            self.pend_inicio = None
-            self.inicios, self.metas, self.vehiculos = [], [], []
-            self._cfg = (n, length, width, vmax)
-            self.estado.set("MANUAL · Clic para el INICIO del vehículo 1.")
-            self._dibujar_estatico()
-            return
-
-        self.modo_manual = False
         if not self._aleatorias(n, length, width):
             from tkinter import messagebox
             messagebox.showwarning("Sin espacio",
@@ -1169,41 +1152,7 @@ class App:
             Vehiculo(i, self.inicios[i], self.metas[i], length, width, vmax)
             for i in range(n)]
 
-    def click_mapa(self, ev):
-        if not self.modo_manual:
-            return
-        n, length, width, vmax = self._cfg
-        x, y = ev.x / SCALE, ev.y / SCALE
 
-        if self.colocando_inicio:
-            if not self.env.libre(x, y, 0.0, length, width, margen=0.2):
-                self.estado.set("Inicio inválido (fuera o sobre obstáculo). Otro punto.")
-                return
-            self.pend_inicio = (x, y)
-            self.colocando_inicio = False
-            self.estado.set(f"MANUAL · Clic para el DESTINO del vehículo {len(self.metas) + 1}.")
-            self._marca(x, y, PALETA[len(self.metas) % len(PALETA)])
-        else:
-            if not self.env.libre(x, y, 0.0, length, width, margen=0.2):
-                self.estado.set("Destino inválido. Elige otro punto.")
-                return
-            ix, iy = self.pend_inicio
-            self.inicios.append((ix, iy, math.atan2(y - iy, x - ix)))
-            self.metas.append((x, y))
-            self.colocando_inicio = True
-            if len(self.metas) >= n:
-                self.modo_manual = False
-                self._crear_vehiculos(length, width, vmax)
-                self.estado.set(f"{n} vehículos colocados. Pulsa «Calcular y simular».")
-                self._dibujar_estatico()
-            else:
-                self.estado.set(f"MANUAL · Clic para el INICIO del vehículo {len(self.metas) + 1}.")
-                self._dibujar_estatico()
-
-    def _marca(self, x, y, col):
-        r = 4
-        self.canvas.create_oval(x * SCALE - r, y * SCALE - r,
-                                x * SCALE + r, y * SCALE + r, fill=col, outline="")
 
     def calcular_y_simular(self):
         p = self._params()
