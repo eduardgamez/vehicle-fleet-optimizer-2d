@@ -5,13 +5,19 @@ un mapa con obstáculos, **sin chocar entre ellos ni con obstáculos**, con fís
 realista. El programa calcula las rutas, las coordina en el tiempo y
 las puede reproducir.
 
+- **Prioridades avanzadas:** se pueden asignar prioridades por vehículo y por grupos.
+- **Personalización total:** es posible definir todas las características de cada vehículo, incluyendo incluso el **ángulo de llegada** a la meta.
+- **Misiones encadenadas:** permite reutilizar vehículos y asignarles nuevos objetivos una vez han alcanzado su destino anterior.
+- **Mapas personalizados:** admite importar imágenes como mapas de obstáculos, así como guardar y cargar entornos propios.
+- **Control calidad-tiempo:** se puede ajustar el equilibrio entre la calidad de las rutas y el tiempo de cálculo.
+
 Ejecutar:
 
 ```bash
 python3 multi_v_evo.py
 ```
 
-El archivo `multi_vehiculo.py` incluido es una versión reducida. Carece de características avanzadas como importar mapas desde imágenes, modos de optimización por prioridades, ángulos de llegada específicos y reasignación de misiones en caliente.
+El archivo `multi_vehiculo.py` incluido es una versión reducida. No tiene algunas características avanzadas como importar mapas desde imágenes, modos de optimización por prioridades, ángulos de llegada específicos y reasignación de destinos.
 
 ## Cómo funciona por dentro (resumen)
 
