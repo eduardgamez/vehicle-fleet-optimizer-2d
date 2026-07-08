@@ -8,9 +8,9 @@
 </head>
 <body>
 
-<div class="panel-window">
-
-  <div class="panel-content">
+<div class="app-layout">
+  <div class="panel-window">
+    <div class="panel-content">
     
     <!-- Parámetros -->
     <div class="card">
@@ -20,11 +20,11 @@
       </div>
       <div class="field-row">
         <span>Nº vehículos</span>
-        <input class="text-input" value="4">
+        <input class="text-input" id="num-vehiculos" value="4">
       </div>
       <div class="field-row">
         <span>Densidad obstáculos</span>
-        <input class="text-input" value="0.0">
+        <input class="text-input" id="densidad-obs" value="0.0">
       </div>
       <div class="slider-container">
         <div class="field-row">
@@ -54,8 +54,8 @@
         <button class="active" data-val="aleatorio">Aleatorio</button>
         <button data-val="manual">Manual</button>
       </div>
-      <button class="btn btn-outline">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <button class="btn btn-outline" id="btn-insertar">
+        <svg class="icon-15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M3 13h11V7H3z"></path>
           <path d="M14 10h4l3 3v3h-7z"></path>
           <circle cx="7" cy="17.5" r="1.6"></circle>
@@ -77,8 +77,8 @@
         <button class="active" data-val="secuencial">Secuencial</button>
       </div>
       <div class="field-row" style="opacity:.72">
-        <span style="font-size:12px">Órdenes a explorar</span>
-        <input class="text-input" value="12" style="width:48px; font-size:12px; padding:5px 8px;">
+        <span>Órdenes a explorar</span>
+        <input class="text-input" id="max-cand" value="12" >
       </div>
     </div>
 
@@ -88,17 +88,17 @@
         <span class="tick"></span>
         <span>Ejecución</span>
       </div>
-      <button class="btn btn-primary">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M7 4.5v15l12-7.5z"></path></svg>Simular
+      <button class="btn btn-primary" id="btn-simular">
+        <svg class="icon-13" viewBox="0 0 24 24" fill="currentColor"><path d="M7 4.5v15l12-7.5z"></path></svg>Simular
       </button>
-      <button class="btn btn-secondary">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+      <button class="btn btn-secondary" id="btn-nuevas-rutas">
+        <svg class="icon-13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M21 12a9 9 0 1 1-2.6-6.3"></path><path d="M21 3v5h-5"></path>
         </svg>Nuevas rutas
       </button>
       <div style="display:flex;gap:8px">
-        <button class="btn btn-icon" title="Reiniciar">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor">
+        <button class="btn btn-icon" id="btn-restart" title="Reiniciar">
+          <svg class="icon-15" viewBox="0 0 24 24" fill="currentColor">
             <rect x="5" y="4" width="2.6" height="16" rx="1"></rect><path d="M20 5 9 12l11 7z"></path>
           </svg>
         </button>
@@ -106,8 +106,8 @@
           <svg id="icon-play" width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M7 4.5v15l12-7.5z"></path></svg>
           <svg id="icon-pause" class="icon-hidden" width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4.5" height="16" rx="1"></rect><rect x="13.5" y="4" width="4.5" height="16" rx="1"></rect></svg>
         </button>
-        <button class="btn btn-icon" title="Reproducir de nuevo">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+        <button class="btn btn-icon" id="btn-reproducir" title="Reproducir de nuevo">
+          <svg class="icon-15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M3 12a9 9 0 1 0 3-6.7"></path><path d="M3 3v4.5h4.5"></path>
           </svg>
         </button>
@@ -121,32 +121,59 @@
         <span>Mapa</span>
       </div>
       <div class="map-grid">
-        <button class="map-btn">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none">
+        <button class="map-btn" id="btn-mapa-aleatorio">
+          <svg class="icon-15" viewBox="0 0 24 24" fill="none">
             <rect x="3.5" y="3.5" width="17" height="17" rx="4" stroke="var(--accent)" stroke-width="1.8"></rect>
             <circle cx="8.5" cy="8.5" r="1.5" fill="var(--accent)"></circle>
             <circle cx="12" cy="12" r="1.5" fill="var(--accent)"></circle>
             <circle cx="15.5" cy="15.5" r="1.5" fill="var(--accent)"></circle>
           </svg>Aleatorio
         </button>
-        <button class="map-btn">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <button class="map-btn" id="btn-mapa-importar">
+          <svg class="icon-15" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
             <path d="M12 3v11M8 10l4 4 4-4"></path><path d="M4 20h16"></path>
           </svg>Importar
         </button>
-        <button class="map-btn">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <button class="map-btn" id="btn-mapa-guardar">
+          <svg class="icon-15" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
             <path d="M5 4h11l3 3v13H5z"></path><path d="M8 4v6h7"></path>
           </svg>Guardar
         </button>
-        <button class="map-btn">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <button class="map-btn" id="btn-mapa-cargar">
+          <svg class="icon-15" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
             <path d="M3 6h6l2 2h10v11H3z"></path>
           </svg>Cargar
         </button>
       </div>
+      <input type="file" id="file-importar" accept="image/*" style="display:none">
+      <input type="file" id="file-cargar" accept=".json" style="display:none">
     </div>
 
+    </div>
+  </div>
+
+  <!-- Contenido Principal: Mapa y Entrada de Texto -->
+  <div class="main-content">
+    <div class="canvas-container">
+      <canvas id="main-canvas"></canvas>
+    </div>
+
+    <div class="textarea-card">
+      <div class="textarea-label">Vehículos manuales / nuevas rutas (lista de diccionarios; ángulos en grados):</div>
+      <textarea id="vehiculos-input" class="code-textarea" spellcheck="false">[
+ {"id": 1, "inicio": [3, 3],  "giro_inicial": 0,  "meta": [36, 20],
+  "angulo_llegada": 90, "largo": 1.6, "ancho": 0.8, "v_max": 3.0,
+  "a_max": 1.2, "giro_max": 33, "grupo": 1, "prioridad": 1},
+ {"id": 2, "inicio": [36, 3], "meta": [4, 20], "grupo": 1, "prioridad": 1},
+ {"id": 3, "inicio": [20, 2], "meta": [20, 21], "angulo_llegada": "libre",
+  "grupo": 2, "prioridad": 1}
+]</textarea>
+    </div>
+    <div class="status-bar-container">
+      <div class="status-bar">
+        <span id="status-text">Listo. Ajusta parámetros y genera vehículos.</span>
+      </div>
+    </div>
   </div>
 </div>
 

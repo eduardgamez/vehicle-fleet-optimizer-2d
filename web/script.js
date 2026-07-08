@@ -4,7 +4,14 @@ document.addEventListener('DOMContentLoaded', () => {
     source: 'aleatorio',
     optim: 'secuencial',
     quality: 3,
-    playing: false
+    playing: false,
+    mundo: { W: 40, H: 24 },
+    obstaculos: [],
+    vehiculos: [],
+    trayectorias: [],
+    frames: [],
+    frameIndex: 0,
+    animId: null
   };
 
   // DOM Elements
@@ -15,27 +22,59 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const segSource = document.getElementById('seg-source');
   const thumbSource = document.getElementById('thumb-source');
-  const sourceButtons = segSource.querySelectorAll('button');
+  const sourceButtons = segSource?.querySelectorAll('button') || [];
 
   const segOptim = document.getElementById('seg-optim');
   const thumbOptim = document.getElementById('thumb-optim');
-  const optimButtons = segOptim.querySelectorAll('button');
+  const optimButtons = segOptim?.querySelectorAll('button') || [];
 
   const btnPlay = document.getElementById('btn-play');
   const iconPlay = document.getElementById('icon-play');
   const iconPause = document.getElementById('icon-pause');
+  const btnRestart = document.getElementById('btn-restart');
+  const btnReproducir = document.getElementById('btn-reproducir');
+
+  const btnInsertar = document.getElementById('btn-insertar');
+  const btnSimular = document.getElementById('btn-simular');
+  const btnNuevasRutas = document.getElementById('btn-nuevas-rutas');
+
+  const btnMapaAleatorio = document.getElementById('btn-mapa-aleatorio');
+  const btnMapaImportar = document.getElementById('btn-mapa-importar');
+  const btnMapaGuardar = document.getElementById('btn-mapa-guardar');
+  const btnMapaCargar = document.getElementById('btn-mapa-cargar');
+  const fileImportar = document.getElementById('file-importar');
+  const fileCargar = document.getElementById('file-cargar');
+
+  const numVehiculosInput = document.getElementById('num-vehiculos');
+  const densidadInput = document.getElementById('densidad-obs');
+  const maxCandInput = document.getElementById('max-cand');
+  const vehiculosInput = document.getElementById('vehiculos-input');
+  const statusText = document.getElementById('status-text');
+
+  const canvas = document.getElementById('main-canvas');
+  const ctx = canvas ? canvas.getContext('2d') : null;
+
+  // Setup Canvas para agudeza Retina
+  const setupCanvas = () => {
+    if (!canvas || !ctx) return;
+    const rect = canvas.parentElement.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    drawScene();
+  };
+
+  window.addEventListener('resize', setupCanvas);
 
   // --- Quality Slider Logic ---
   const updateQuality = (pct) => {
-    // 0 to 1
     const val = Math.round(1 + pct * 4);
     state.quality = val;
-    qualityVal.textContent = val;
-    
-    // Update visual percentage (0% to 100%)
+    if (qualityVal) qualityVal.textContent = val;
     const pctString = ((val - 1) / 4 * 100) + '%';
-    qualityFill.style.width = pctString;
-    qualityThumb.style.left = pctString;
+    if (qualityFill) qualityFill.style.width = pctString;
+    if (qualityThumb) qualityThumb.style.left = pctString;
   };
 
   const handlePointer = (e) => {
@@ -45,8 +84,10 @@ document.addEventListener('DOMContentLoaded', () => {
     updateQuality(p);
   };
 
-  qualitySlider.addEventListener('pointerdown', handlePointer);
-  qualitySlider.addEventListener('pointermove', handlePointer);
+  if (qualitySlider) {
+    qualitySlider.addEventListener('pointerdown', handlePointer);
+    qualitySlider.addEventListener('pointermove', handlePointer);
+  }
 
   // --- Segmented Control: Source ---
   sourceButtons.forEach((btn, index) => {
@@ -54,9 +95,9 @@ document.addEventListener('DOMContentLoaded', () => {
       sourceButtons.forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
       state.source = btn.getAttribute('data-val');
-      
-      const widthPct = 100 / sourceButtons.length;
-      thumbSource.style.left = `calc(${index} * 100% / ${sourceButtons.length} + 2px)`;
+      if (thumbSource) {
+        thumbSource.style.left = `calc(${index} * 100% / ${sourceButtons.length} + 2px)`;
+      }
     });
   });
 
@@ -66,22 +107,439 @@ document.addEventListener('DOMContentLoaded', () => {
       optimButtons.forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
       state.optim = btn.getAttribute('data-val');
-      
-      const widthPct = 100 / optimButtons.length;
-      thumbOptim.style.left = `calc(${index} * 100% / ${optimButtons.length} + 2px)`;
+      if (thumbOptim) {
+        thumbOptim.style.left = `calc(${index} * 100% / ${optimButtons.length} + 2px)`;
+      }
     });
   });
 
-  // --- Play / Pause ---
-  btnPlay.addEventListener('click', () => {
+  // --- Dibujo en el Canvas ---
+  const drawScene = () => {
+    if (!canvas || !ctx) return;
+    const dpr = window.devicePixelRatio || 1;
+    const w = canvas.width / dpr;
+    const h = canvas.height / dpr;
+    ctx.clearRect(0, 0, w, h);
+
+    // Fondo claro como en multi_v_evo.py (#f4f6fb)
+    ctx.fillStyle = '#f4f6fb';
+    ctx.fillRect(0, 0, w, h);
+
+    const scale = Math.min(w / state.mundo.W, h / state.mundo.H);
+    const offsetX = (w - state.mundo.W * scale) / 2;
+    const offsetY = (h - state.mundo.H * scale) / 2;
+
+    // Dibujar obstáculos (#3a4252 con borde #1f2530)
+    ctx.fillStyle = '#3a4252';
+    ctx.strokeStyle = '#1f2530';
+    ctx.lineWidth = 1;
+    state.obstaculos.forEach(pol => {
+      if (pol.length < 3) return;
+      ctx.beginPath();
+      ctx.moveTo(pol[0][0] * scale + offsetX, pol[0][1] * scale + offsetY);
+      for (let i = 1; i < pol.length; i++) {
+        ctx.lineTo(pol[i][0] * scale + offsetX, pol[i][1] * scale + offsetY);
+      }
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+    });
+
+    // Dibujar trayectorias completas si están calculadas
+    state.vehiculos.forEach(v => {
+      const color = v.color || '#007aff';
+      const tInfo = state.trayectorias.find(t => String(t.id) === String(v.id));
+      if (tInfo && tInfo.traj && tInfo.traj.length >= 2) {
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        const pt0 = tInfo.traj[0];
+        ctx.moveTo(pt0[0] * scale + offsetX, pt0[1] * scale + offsetY);
+        for (let i = 1; i < tInfo.traj.length; i++) {
+          const pt = tInfo.traj[i];
+          ctx.lineTo(pt[0] * scale + offsetX, pt[1] * scale + offsetY);
+        }
+        ctx.stroke();
+      }
+    });
+
+    // Dibujar vehículos / metas
+    state.vehiculos.forEach(v => {
+      const color = v.color || '#007aff';
+      const [ix, iy] = v.inicio;
+      const [mx, my] = v.meta;
+
+      // Círculo de meta
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(mx * scale + offsetX, my * scale + offsetY, 7, 0, Math.PI * 2);
+      ctx.stroke();
+
+      // Flecha de ángulo de llegada si existe
+      if (v.meta_th !== null && v.meta_th !== undefined) {
+        const ax = mx + 1.2 * Math.cos(v.meta_th);
+        const ay = my + 1.2 * Math.sin(v.meta_th);
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(mx * scale + offsetX, my * scale + offsetY);
+        ctx.lineTo(ax * scale + offsetX, ay * scale + offsetY);
+        ctx.stroke();
+
+        const headlen = 5;
+        const angle = v.meta_th;
+        ctx.beginPath();
+        ctx.moveTo(ax * scale + offsetX, ay * scale + offsetY);
+        ctx.lineTo(
+          (ax * scale + offsetX) - headlen * Math.cos(angle - Math.PI / 6),
+          (ay * scale + offsetX) - headlen * Math.sin(angle - Math.PI / 6)
+        );
+        ctx.moveTo(ax * scale + offsetX, ay * scale + offsetY);
+        ctx.lineTo(
+          (ax * scale + offsetX) - headlen * Math.cos(angle + Math.PI / 6),
+          (ay * scale + offsetX) - headlen * Math.sin(angle + Math.PI / 6)
+        );
+        ctx.stroke();
+      }
+
+      // Pose actual del vehículo
+      let currX = ix;
+      let currY = iy;
+      let currTh = (v.inicio.length > 2) ? v.inicio[2] : 0;
+
+      if (state.frames && state.frames.length > 0) {
+        const fIdx = Math.min(state.frameIndex, state.frames.length - 1);
+        const fr = state.frames[fIdx];
+        const pose = fr ? fr[String(v.id)] : null;
+        if (pose) {
+          currX = pose[0];
+          currY = pose[1];
+          currTh = pose[2];
+        }
+      }
+
+      const lPx = Math.max(16, (v.largo || 1.3) * scale);
+      const wPx = Math.max(9, (v.ancho || 0.7) * scale);
+
+      // Rectángulo de vehículo rotado
+      ctx.save();
+      ctx.translate(currX * scale + offsetX, currY * scale + offsetY);
+      ctx.rotate(currTh);
+
+      ctx.fillStyle = color;
+      ctx.strokeStyle = '#101010';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      if (ctx.roundRect) {
+        ctx.roundRect(-lPx / 2, -wPx / 2, lPx, wPx, 3);
+      } else {
+        ctx.rect(-lPx / 2, -wPx / 2, lPx, wPx);
+      }
+      ctx.fill();
+      ctx.stroke();
+
+      // Indicador frontal blanco
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.lineTo(lPx * 0.36, 0);
+      ctx.stroke();
+      ctx.restore();
+
+      // ID del vehículo
+      ctx.save();
+      ctx.translate(currX * scale + offsetX, currY * scale + offsetY);
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 11px -apple-system, system-ui, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(String(v.id), 0, 0);
+      ctx.restore();
+    });
+  };
+
+  // --- Bucle de Animación ---
+  const animStep = () => {
+    if (!state.playing) return;
+    drawScene();
+
+    if (state.frames && state.frameIndex < state.frames.length - 1) {
+      state.frameIndex++;
+      state.animId = requestAnimationFrame(animStep);
+    } else {
+      state.playing = false;
+      if (iconPause) iconPause.classList.add('icon-hidden');
+      if (iconPlay) iconPlay.classList.remove('icon-hidden');
+    }
+  };
+
+  btnPlay?.addEventListener('click', () => {
     state.playing = !state.playing;
     if (state.playing) {
-      iconPlay.classList.add('icon-hidden');
-      iconPause.classList.remove('icon-hidden');
+      if (iconPlay) iconPlay.classList.add('icon-hidden');
+      if (iconPause) iconPause.classList.remove('icon-hidden');
+      state.animId = requestAnimationFrame(animStep);
     } else {
-      iconPause.classList.add('icon-hidden');
-      iconPlay.classList.remove('icon-hidden');
+      if (iconPause) iconPause.classList.add('icon-hidden');
+      if (iconPlay) iconPlay.classList.remove('icon-hidden');
+      if (state.animId) cancelAnimationFrame(state.animId);
     }
   });
 
+  btnRestart?.addEventListener('click', () => {
+    state.playing = false;
+    if (iconPause) iconPause.classList.add('icon-hidden');
+    if (iconPlay) iconPlay.classList.remove('icon-hidden');
+    state.frameIndex = 0;
+    drawScene();
+  });
+
+  btnReproducir?.addEventListener('click', () => {
+    state.frameIndex = 0;
+    state.playing = true;
+    if (iconPlay) iconPlay.classList.add('icon-hidden');
+    if (iconPause) iconPause.classList.remove('icon-hidden');
+    state.animId = requestAnimationFrame(animStep);
+  });
+
+  // --- Inicialización del Mapa y Estado ---
+  const initApp = async () => {
+    try {
+      const res = await fetch('/api/init');
+      const data = await res.json();
+      if (data.ok) {
+        state.obstaculos = data.obstaculos || [];
+        state.vehiculos = data.vehiculos || [];
+        if (data.mundo) state.mundo = data.mundo;
+        if (data.texto && vehiculosInput) {
+          vehiculosInput.value = data.texto;
+        }
+        statusText.textContent = "Listo. Mapa cargado. Puedes insertar o generar vehículos.";
+        setupCanvas();
+      }
+    } catch (err) {
+      statusText.textContent = `Error cargando mapa: ${err.message}`;
+    }
+  };
+
+  // --- Conexión con Endpoints API (/api/generar) ---
+  const generarVehiculos = async () => {
+    statusText.textContent = "Generando vehículos en servidor...";
+    try {
+      const res = await fetch('/api/generar', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          modo: state.source,
+          num_vehiculos: parseInt(numVehiculosInput?.value || 4),
+          texto: vehiculosInput?.value || ""
+        })
+      });
+      const data = await res.json();
+      if (!data.ok) {
+        statusText.textContent = `Error: ${data.error}`;
+        return;
+      }
+
+      state.obstaculos = data.obstaculos || state.obstaculos;
+      state.vehiculos = data.vehiculos || [];
+      state.trayectorias = [];
+      state.frames = [];
+      state.frameIndex = 0;
+      if (data.mundo) state.mundo = data.mundo;
+      if (data.texto && vehiculosInput) {
+        vehiculosInput.value = data.texto;
+      }
+
+      statusText.textContent = `${state.vehiculos.length} vehículos cargados/generados. Pulsa «Simular».`;
+      drawScene();
+    } catch (err) {
+      statusText.textContent = `Error de red: ${err.message}`;
+    }
+  };
+
+  btnInsertar?.addEventListener('click', generarVehiculos);
+
+  // --- Botones de Mapa ---
+  btnMapaAleatorio?.addEventListener('click', async () => {
+    statusText.textContent = "Generando nuevo mapa aleatorio...";
+    try {
+      const res = await fetch('/api/mapa/aleatorio', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          densidad: parseFloat(densidadInput?.value || 0.0)
+        })
+      });
+      const data = await res.json();
+      if (data.ok) {
+        state.obstaculos = data.obstaculos || [];
+        state.vehiculos = [];
+        state.trayectorias = [];
+        state.frames = [];
+        state.frameIndex = 0;
+        statusText.textContent = "Nuevo mapa aleatorio generado. Inserta vehículos.";
+        drawScene();
+      }
+    } catch (err) {
+      statusText.textContent = `Error al generar mapa: ${err.message}`;
+    }
+  });
+
+  btnMapaImportar?.addEventListener('click', () => {
+    fileImportar?.click();
+  });
+
+  fileImportar?.addEventListener('change', async () => {
+    if (!fileImportar.files || fileImportar.files.length === 0) return;
+    const formData = new FormData();
+    formData.append('archivo', fileImportar.files[0]);
+    statusText.textContent = "Importando imagen como mapa...";
+    try {
+      const res = await fetch('/api/mapa/importar', {
+        method: 'POST',
+        body: formData
+      });
+      const data = await res.json();
+      if (data.ok) {
+        state.obstaculos = data.obstaculos || [];
+        state.vehiculos = [];
+        state.trayectorias = [];
+        state.frames = [];
+        state.frameIndex = 0;
+        statusText.textContent = "Mapa importado desde imagen. Inserta vehículos.";
+        drawScene();
+      } else {
+        statusText.textContent = `Error importando imagen: ${data.error}`;
+      }
+    } catch (err) {
+      statusText.textContent = `Error: ${err.message}`;
+    }
+  });
+
+  btnMapaGuardar?.addEventListener('click', async () => {
+    try {
+      const res = await fetch('/api/mapa/guardar');
+      const data = await res.json();
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'mapa_guardado.json';
+      a.click();
+      URL.revokeObjectURL(url);
+      statusText.textContent = "Mapa guardado como archivo JSON.";
+    } catch (err) {
+      statusText.textContent = `Error al guardar mapa: ${err.message}`;
+    }
+  });
+
+  btnMapaCargar?.addEventListener('click', () => {
+    fileCargar?.click();
+  });
+
+  fileCargar?.addEventListener('change', async () => {
+    if (!fileCargar.files || fileCargar.files.length === 0) return;
+    const formData = new FormData();
+    formData.append('archivo', fileCargar.files[0]);
+    statusText.textContent = "Cargando mapa desde archivo...";
+    try {
+      const res = await fetch('/api/mapa/cargar', {
+        method: 'POST',
+        body: formData
+      });
+      const data = await res.json();
+      if (data.ok) {
+        state.obstaculos = data.obstaculos || [];
+        state.vehiculos = [];
+        state.trayectorias = [];
+        state.frames = [];
+        state.frameIndex = 0;
+        statusText.textContent = "Mapa cargado correctamente. Inserta vehículos.";
+        drawScene();
+      } else {
+        statusText.textContent = `Error cargando mapa: ${data.error}`;
+      }
+    } catch (err) {
+      statusText.textContent = `Error: ${err.message}`;
+    }
+  });
+
+  // --- Conexión con Endpoints API (/api/simular) ---
+  const simularFlota = async () => {
+    if (state.vehiculos.length === 0) {
+      await generarVehiculos();
+    }
+    statusText.textContent = "Calculando rutas optimizadas en Python...";
+    try {
+      const res = await fetch('/api/simular', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          calidad: state.quality,
+          optimizacion: state.optim,
+          max_cand: parseInt(maxCandInput?.value || 12)
+        })
+      });
+      const data = await res.json();
+      if (!data.ok) {
+        statusText.textContent = `Error en simulación: ${data.error}`;
+        return;
+      }
+
+      state.trayectorias = data.trayectorias || [];
+      state.frames = data.frames || [];
+      state.frameIndex = 0;
+      state.playing = true;
+      if (iconPlay) iconPlay.classList.add('icon-hidden');
+      if (iconPause) iconPause.classList.remove('icon-hidden');
+
+      statusText.textContent = "¡Simulación en curso!";
+      state.animId = requestAnimationFrame(animStep);
+    } catch (err) {
+      statusText.textContent = `Error de simulación: ${err.message}`;
+    }
+  };
+
+  btnSimular?.addEventListener('click', simularFlota);
+
+  // --- Nuevas Rutas ---
+  btnNuevasRutas?.addEventListener('click', async () => {
+    statusText.textContent = "Calculando nuevas rutas para vehículos del texto...";
+    try {
+      const res = await fetch('/api/nuevas_rutas', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          texto: vehiculosInput?.value || "",
+          calidad: state.quality,
+          optimizacion: state.optim,
+          max_cand: parseInt(maxCandInput?.value || 12)
+        })
+      });
+      const data = await res.json();
+      if (!data.ok) {
+        statusText.textContent = `Error: ${data.error}`;
+        return;
+      }
+
+      state.vehiculos = data.vehiculos || state.vehiculos;
+      state.trayectorias = data.trayectorias || [];
+      state.frames = data.frames || [];
+      state.frameIndex = 0;
+      state.playing = true;
+      if (iconPlay) iconPlay.classList.add('icon-hidden');
+      if (iconPause) iconPause.classList.remove('icon-hidden');
+
+      statusText.textContent = "¡Simulación de nuevas rutas en curso!";
+      state.animId = requestAnimationFrame(animStep);
+    } catch (err) {
+      statusText.textContent = `Error: ${err.message}`;
+    }
+  });
+
+  // Inicializar al cargar el documento
+  initApp();
 });
