@@ -519,6 +519,38 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
+  // El cálculo ya NO bloquea la petición: el servidor lo corre en segundo plano
+  // y aquí se consulta el progreso hasta que termina. Así el navegador nunca
+  // corta por timeout ("Load failed"), por muy difícil que sea la planificación.
+  const dormir = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  const ejecutarConProgreso = async (url, body) => {
+    // 1) Lanza el trabajo (respuesta inmediata).
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    const arranque = await leerRespuesta(res);
+    if (!res.ok || !arranque.ok) {
+      throw new Error(arranque.error || 'No se pudo iniciar la simulación.');
+    }
+    // 2) Sondea el estado y va mostrando el progreso hasta done/error.
+    while (true) {
+      await dormir(700);
+      let est;
+      try {
+        const r = await fetch(url + '/estado');
+        est = await leerRespuesta(r);
+      } catch (_) {
+        continue;   // fallo puntual de red al sondear: reintenta
+      }
+      if (est.progreso) statusText.textContent = est.progreso;
+      if (est.estado === 'done') return est.resultado;
+      if (est.estado === 'error') throw new Error(est.error || 'Error en el cálculo.');
+    }
+  };
+
   // --- Conexión con Endpoints API (/api/simular) ---
   const simularFlota = async () => {
     if (state.vehiculos.length === 0) {
@@ -527,24 +559,17 @@ document.addEventListener('DOMContentLoaded', () => {
     statusText.textContent = "Calculando rutas optimizadas en Python...";
     setLoading(true);
     try {
-      const res = await fetch('/api/simular', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          calidad: state.quality,
-          optimizacion: state.optim,
-          max_cand: parseInt(maxCandInput?.value || 12)
-        })
+      const data = await ejecutarConProgreso('/api/simular', {
+        calidad: state.quality,
+        optimizacion: state.optim,
+        max_cand: parseInt(maxCandInput?.value || 12)
       });
-      const data = await leerRespuesta(res);
-      if (!res.ok || !data.ok) {
-        statusText.textContent = `Error en simulación: ${data.error}`;
+      if (!data || !data.ok) {
+        statusText.textContent = `Error en simulación: ${data && data.error ? data.error : 'sin resultado'}`;
         return;
       }
-
       state.trayectorias = data.trayectorias || [];
       state.frames = data.frames || [];
-
       statusText.textContent = "¡Simulación en curso!";
       iniciarReproduccion(true);
     } catch (err) {
@@ -561,26 +586,19 @@ document.addEventListener('DOMContentLoaded', () => {
     statusText.textContent = "Calculando nuevas rutas para vehículos del texto...";
     setLoading(true);
     try {
-      const res = await fetch('/api/nuevas_rutas', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          texto: vehiculosInput?.value || "",
-          calidad: state.quality,
-          optimizacion: state.optim,
-          max_cand: parseInt(maxCandInput?.value || 12)
-        })
+      const data = await ejecutarConProgreso('/api/nuevas_rutas', {
+        texto: vehiculosInput?.value || "",
+        calidad: state.quality,
+        optimizacion: state.optim,
+        max_cand: parseInt(maxCandInput?.value || 12)
       });
-      const data = await leerRespuesta(res);
-      if (!data.ok) {
-        statusText.textContent = `Error: ${data.error}`;
+      if (!data || !data.ok) {
+        statusText.textContent = `Error: ${data && data.error ? data.error : 'sin resultado'}`;
         return;
       }
-
       state.vehiculos = data.vehiculos || state.vehiculos;
       state.trayectorias = data.trayectorias || [];
       state.frames = data.frames || [];
-
       statusText.textContent = "¡Simulación de nuevas rutas en curso!";
       iniciarReproduccion(true);
     } catch (err) {

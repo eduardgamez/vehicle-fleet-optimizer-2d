@@ -115,6 +115,16 @@ STEER_SPEED_C = 0.35
 A_LAT_MAX = 1.5
 
 
+# Relajación del ÁNGULO DE LLEGADA (red de seguridad para que todo vehículo
+# LLEGUE aunque no logre encajar la orientación exacta). Se respeta el ángulo
+# exacto hasta REL_INI nodos creados; a partir de ahí la tolerancia se ensancha
+# de forma lineal a lo largo de REL_SPAN nodos hasta aceptar cualquier
+# orientación. Umbrales absolutos: acotan el tiempo del caso difícil por igual
+# en localhost y en Render, sin depender del techo de memoria.
+REL_INI = 150_000
+REL_SPAN = 200_000
+
+
 # --------------------------------------------------------------------------- #
 # Mundo (en metros) y dibujo
 # --------------------------------------------------------------------------- #
@@ -368,6 +378,14 @@ def _k_tiro(x, y, th, v, k, gx, gy, gth, con_ang, ang_tol,
         largo_max = 2.4 * d0 + 4.0 * goal_tol + 6.0
     else:
         largo_max = 1.5 * d0 + 2.0 * goal_tol
+    # Velocidad tope del remate: no ACELERAR de golpe al tomar el relevo. El
+    # remate es una maniobra de finalización; si la búsqueda llegó despacio
+    # (venía de una curva), el conector no debe pegar un acelerón para luego
+    # frenar en la curva final (el molesto "frena y vuelve a arrancar"). Se
+    # permite como mucho la velocidad de entrada, con un suelo de 0.5·vmax para
+    # que no se arrastre. Solo puede FRENAR respecto a esto (para la meta o por
+    # el límite de curva), nunca superar el tope.
+    v_tope = v if v > 0.5 * vmaxc else 0.5 * vmaxc
     kk = k
     for _ in range(900):
         d = hypot(gx - x, gy - y)
@@ -390,6 +408,8 @@ def _k_tiro(x, y, th, v, k, gx, gy, gth, con_ang, ang_tol,
         v_ant = v
         dd = d if d > 0.0 else 0.0
         v_des = min(vmaxc, sqrt(2.0 * amax * dd))
+        if v_des > v_tope:                    # no acelerar por encima del tope
+            v_des = v_tope
         dv = max(-amax * h, min(amax * h, v_des - v))
         v = min(vmaxc, max(0.0, v + dv))
         alpha = atan2(ty - y, tx - x) - th
@@ -955,6 +975,10 @@ class Planificador:
         self.configurar_calidad(3)
         self.deadline = None
         self.tick = None
+        self.motivo = ""
+        self.expandidos = 0                  # diagnóstico del último planificar()
+        self.nodos = 0
+        self.relajado = False                # ¿llegó con el ángulo relajado?
         # Conector reversible: entra en acción solo cuando la búsqueda se atasca
         # asentando el ángulo de llegada (más nodos que 'umbral_maniobra'), y como
         # mucho una vez cada 'paso_maniobra' expansiones para no encarecerla.
@@ -993,11 +1017,11 @@ class Planificador:
         # lateral (A_LAT_MAX), así que subirlo no empeora los giros; solo hace
         # las rutas algo menos óptimas (un poco más largas), cosa asumible.
         tabla = {
-            1: (17, 12, 2.6,  800000),
-            2: (23, 11, 2.3, 1100000),
-            3: (31, 10, 2.0, 1600000),
-            4: (41,  8, 1.6, 2400000),
-            5: (55,  6, 1.3, 3600000),
+            1: (17, 12, 1.7,  800000),
+            2: (23, 11, 1.5, 1100000),
+            3: (31, 10, 1.35, 1600000),
+            4: (41,  8, 1.2, 2400000),
+            5: (55,  6, 1.08, 3600000),
         }
         n_dir, ang, peso, mx = tabla.get(int(nivel), tabla[3])
         half = n_dir // 2
@@ -1227,10 +1251,13 @@ class Planificador:
         self._exp_ult_maniobra = 0
         self._last_tick = time.perf_counter()
         self.motivo = "limite"
+        self.relajado = False
 
         while abierto and expand < self.max_exp and nid < self.max_nodos:
             _f, cid, x, y, th, v, k, g = heapq.heappop(abierto)
             expand += 1
+            self.expandidos = expand        # diagnóstico: nodos expandidos
+            self.nodos = nid                 # diagnóstico: nodos creados
 
             if (expand & 255) == 0:
                 now = time.perf_counter()
@@ -1242,6 +1269,35 @@ class Planificador:
                     self.tick(expand)
 
             d_goal = math.hypot(x - gx, y - gy)
+
+            # RELAJACIÓN PROGRESIVA DEL ÁNGULO DE LLEGADA. El caso que agota los
+            # nodos es un vehículo que no logra encajar la orientación exacta y
+            # sigue buscando hasta el techo, quedándose SIN RUTA. Prioridad del
+            # usuario: llegar SIEMPRE > llegar con el ángulo exacto. Así que la
+            # tolerancia del ángulo se ensancha con los nodos creados: exacta al
+            # principio (se respeta cuando es alcanzable), y hacia "cualquier
+            # orientación" a medida que se acerca al techo, de modo que el coche
+            # ACABA LLEGANDO (al peor ángulo, pero llega) antes de agotarlo.
+            if con_ang:
+                # La relajación es una RED DE SEGURIDAD tardía: no toca nada hasta
+                # REL_INI nodos (así se respeta el ángulo EXACTO cuando es
+                # alcanzable, la mayoría de los casos) y, si el vehículo sigue sin
+                # lograrlo, ensancha la tolerancia hasta aceptar cualquier
+                # orientación, para que ACABE LLEGANDO en un tiempo acotado en vez
+                # de buscar el ángulo exacto indefinidamente. Umbral ABSOLUTO (no
+                # ligado al techo de memoria), para que el tiempo sea el mismo en
+                # localhost y en Render.
+                fr = (nid - REL_INI) / REL_SPAN
+                if fr < 0.0:
+                    fr = 0.0
+                elif fr > 1.0:
+                    fr = 1.0
+                ang_tol_din = ang_tol + (math.pi - ang_tol) * fr
+                con_ang_din = 1 if ang_tol_din < 1.396 else 0   # 1.396 rad ≈ 80°
+            else:
+                ang_tol_din = ang_tol
+                con_ang_din = 0
+
             if d_goal <= self.dist_tiro:
                 # Se intenta PRIMERO conducir hasta el punto exacto (tolerancia
                 # fina) con el piloto: así no se acepta un nodo que se queda parado a
@@ -1249,7 +1305,7 @@ class Planificador:
                 # cerca), para no trazar un arco amplio desde una orientación mala.
                 # Con ángulo de llegada, el "apuntar bien" se mide hacia la
                 # zanahoria del eje de llegada, no hacia la meta.
-                if con_ang:
+                if con_ang_din:
                     s0 = min(0.62 * d_goal, 4.0 * L)
                     txa = gx - s0 * math.cos(gth); tya = gy - s0 * math.sin(gth)
                 else:
@@ -1257,7 +1313,7 @@ class Planificador:
                 alpha0 = math.atan2(tya - y, txa - x) - th
                 alpha0 = math.atan2(math.sin(alpha0), math.cos(alpha0))
                 if abs(alpha0) <= self.ang_tiro or d_goal <= self.goal_tol * 1.5:
-                    n, poses = _k_tiro(x, y, th, v, k, gx, gy, gth, con_ang, ang_tol,
+                    n, poses = _k_tiro(x, y, th, v, k, gx, gy, gth, con_ang_din, ang_tol_din,
                                        L, dmax, self.ld_tiro,
                                        self.v_max_c, self.a_max, self.goal_tol_fin,
                                        self.v_tol, h, self._len, self._wid,
@@ -1276,6 +1332,7 @@ class Planificador:
                             base = self._reconstruir(padre_id, arista_id, cid,
                                                      (sx, sy, sth))
                             self.motivo = "ok"
+                            self.relajado = con_ang == 1 and ang_tol_din > ang_tol * 1.01
                             return base + tiro
 
             # Respaldo: ya está dentro de la tolerancia gruesa y casi parado (el
@@ -1283,8 +1340,8 @@ class Planificador:
             # libre y, con ángulo de llegada exigido, si la orientación cuadra.
             if d_goal <= self.goal_tol and abs(v) <= self.v_tol:
                 ang_ok = True
-                if con_ang:
-                    ang_ok = abs(ang_norm(th - gth)) <= 1.5 * ang_tol
+                if con_ang_din:
+                    ang_ok = abs(ang_norm(th - gth)) <= 1.5 * ang_tol_din
                 if ang_ok:
                     Ld = self._len + 2.0 * self.margen_din
                     Wd = self._wid + 2.0 * self.margen_din
@@ -1292,17 +1349,23 @@ class Planificador:
                     if _k_aparca(x, y, th, k, kfin, Ld, Wd,
                                  rx, roff, rlen, rlw, R, self.diag, self.margen_din):
                         self.motivo = "ok"
+                        self.relajado = con_ang == 1 and ang_tol_din > ang_tol * 1.01
                         return self._reconstruir(padre_id, arista_id, cid, (sx, sy, sth))
 
             # Conector REVERSIBLE (adelante-y-atrás para cuadrar el ángulo): solo
             # cuando la búsqueda ya se atasca con el ángulo de llegada exigido y el
             # coche está cerca de la meta. Se prueba de forma espaciada para no
             # encarecer el caso normal. Si encuentra maniobra, cierra la ruta.
-            if (con_ang and d_goal <= self.dist_tiro
+            # EXIGE abs(v) <= v_tol: la maniobra arranca asumiendo el vehículo
+            # PARADO (vmag=0); sin esta comprobación se podía disparar con el
+            # coche aún circulando y la ruta resultante "saltaba" de ir a
+            # velocidad v a frenar en seco para la marcha atrás, sin un tramo de
+            # frenada real entre medias (físicamente imposible).
+            if (con_ang_din and d_goal <= self.dist_tiro and abs(v) <= self.v_tol
                     and expand > self.umbral_maniobra
                     and expand - self._exp_ult_maniobra >= self.paso_maniobra):
                 self._exp_ult_maniobra = expand
-                nm, pm = _k_maniobra(x, y, th, k, gx, gy, gth, ang_tol,
+                nm, pm = _k_maniobra(x, y, th, k, gx, gy, gth, ang_tol_din,
                                      L, dmax, self.ld_tiro, self.v_max_c, self.a_max,
                                      self.goal_tol_fin, self.v_tol, h,
                                      self._len, self._wid, self.margen, self.margen_din,
@@ -1313,6 +1376,7 @@ class Planificador:
                     maniobra = [(pm[i, 0], pm[i, 1], pm[i, 2]) for i in range(nm)]
                     base = self._reconstruir(padre_id, arista_id, cid, (sx, sy, sth))
                     self.motivo = "ok"
+                    self.relajado = con_ang == 1 and ang_tol_din > ang_tol * 1.01
                     return base + maniobra
 
             if k >= self.k_max:
@@ -1343,16 +1407,21 @@ class Planificador:
                 if abs(nv) < 1e-3 and acc[ai] <= 0.0:
                     ng += 0.20 * self.dt              # pararse sin motivo cuesta tiempo
                 ng += 0.10 * self.dt * abs(delta) / dmax          # ε: prefiere ir recto
-                ng += 0.08 * self.dt * abs(delta - dprev)         # ε: sin temblor de volante
-                # ε: sin temblor de acelerador. Sin este término, alternar
+                # ε: sin temblor de volante. Reforzado: mantener el MISMO ángulo
+                # de dirección a lo largo de la curva sale mucho más barato que
+                # ir alternándolo, así la curvatura es estable y —vía el límite
+                # de aceleración lateral— la velocidad también lo es (no sube y
+                # baja en mitad del giro).
+                ng += 0.30 * self.dt * abs(delta - dprev)
+                # ε: sin temblor de acelerador (jerk). Sin él, alternar
                 # acelerar/frenar sale gratis (el coste es solo tiempo) y el
                 # planificador encadena frenadas y arranques sin sentido al
-                # girar —bastaba con reducir un poco la velocidad—. Penalizar el
-                # CAMBIO de aceleración (jerk) hace más barato mantener una
-                # velocidad estable a lo largo de la curva. |Δacc|/a_max ∈ {0,1,2};
-                # una inversión +a→−a cuesta 0.30·dt, disuade el vaivén pero no
-                # impide frenar de verdad cuando hace falta.
-                ng += 0.15 * self.dt * abs(acc[ai] - aprev) / self.a_max
+                # girar —bastaba con reducir un poco la velocidad—. Reforzado
+                # para eliminar el "frena y vuelve a arrancar" al entrar en las
+                # curvas. |Δacc|/a_max ∈ {0,1,2}; una inversión +a→−a cuesta
+                # 0.80·dt: disuade el vaivén con firmeza, pero sigue permitiendo
+                # frenar de verdad cuando hace falta.
+                ng += 0.40 * self.dt * abs(acc[ai] - aprev) / self.a_max
                 key = self._clave(nx, ny, nth, nv, nk)
                 if ng < mejor_g.get(key, float("inf")):
                     mejor_g[key] = ng
@@ -1366,8 +1435,15 @@ class Planificador:
                                    (ng + self.peso_h * hh, nid, nx, ny, nth, nv, nk, ng))
 
         # Frontera vacía → no existe ruta (definitivo). Si quedaban nodos, se
-        # alcanzó el techo de expansiones → resultado inconcluso.
-        self.motivo = "sin_ruta" if not abierto else "limite"
+        # alcanzó el techo de nodos/expansiones → resultado inconcluso.
+        self.expandidos = expand
+        self.nodos = nid
+        if not abierto:
+            self.motivo = "sin_ruta"          # sin salida: algo lo bloquea
+        elif nid >= self.max_nodos:
+            self.motivo = "techo_nodos"       # agotó el presupuesto de nodos
+        else:
+            self.motivo = "limite"            # agotó expansiones/tiempo
         return None
 
     def _reconstruir(self, padre_id, arista_id, cid, inicio):

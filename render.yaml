@@ -6,11 +6,17 @@ services:
     buildCommand: pip install -r requirements.txt
     # 1 SOLO worker: la app guarda estado global (env_actual, vehiculos_actuales)
     # que se muta entre peticiones; con varios workers el estado se corrompería.
-    # Timeout alto porque la simulación evolutiva puede tardar bastante.
-    startCommand: gunicorn server:app --workers 1 --threads 1 --timeout 600 --bind 0.0.0.0:$PORT
+    # Varios THREADS (dentro del mismo worker, memoria compartida) para que las
+    # consultas de progreso GET /api/*/estado respondan mientras el hilo de fondo
+    # planifica. Timeout alto por si acaso, aunque la petición ya no bloquea.
+    startCommand: gunicorn server:app --workers 1 --threads 4 --timeout 600 --bind 0.0.0.0:$PORT
     envVars:
       - key: FLASK_DEBUG
         value: "0"
       # Cache de compilación de Numba en una ruta escribible del contenedor.
       - key: NUMBA_CACHE_DIR
         value: /tmp/numba_cache
+      # Presupuesto de nodos por vehículo. En el plan free (512 MB) se baja
+      # respecto al valor de localhost para no agotar la RAM en casos difíciles.
+      - key: CAP_NODOS
+        value: "500000"
