@@ -162,6 +162,20 @@ def obtener_estado_json(texto_salida=None):
         "mundo": {"W": mve.W, "H": mve.H}
     }
 
+@app.errorhandler(Exception)
+def _errores_como_json(e):
+    """Devuelve SIEMPRE JSON en las rutas /api, incluso ante errores no
+    controlados. Así el frontend puede mostrar el motivo real en vez de
+    fallar al parsear la página HTML de error de Flask (que en Safari da
+    'The string did not match the expected pattern')."""
+    from werkzeug.exceptions import HTTPException
+    if request.path.startswith("/api/"):
+        codigo = e.code if isinstance(e, HTTPException) else 500
+        return jsonify({"ok": False, "error": str(e)}), codigo
+    if isinstance(e, HTTPException):
+        return e
+    return "Error interno del servidor", 500
+
 @app.route("/")
 def index():
     return send_from_directory("web", "index.html")

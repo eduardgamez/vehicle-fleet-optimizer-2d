@@ -504,6 +504,21 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
+  // Lee la respuesta sin asumir que es JSON: si el servidor devuelve una
+  // página HTML de error (502/504 del proxy de Render, o un 500), muestra el
+  // motivo real en vez de "The string did not match the expected pattern".
+  const leerRespuesta = async (res) => {
+    const texto = await res.text();
+    try {
+      return JSON.parse(texto);
+    } catch (_) {
+      const motivo = res.status === 502 || res.status === 503 || res.status === 504
+        ? `El servidor no respondió (código ${res.status}). Puede que la simulación consumiera demasiada memoria o tardara demasiado. Prueba con menos vehículos o menor calidad.`
+        : `El servidor devolvió una respuesta inesperada (código ${res.status}).`;
+      return { ok: false, error: motivo };
+    }
+  };
+
   // --- Conexión con Endpoints API (/api/simular) ---
   const simularFlota = async () => {
     if (state.vehiculos.length === 0) {
@@ -521,8 +536,8 @@ document.addEventListener('DOMContentLoaded', () => {
           max_cand: parseInt(maxCandInput?.value || 12)
         })
       });
-      const data = await res.json();
-      if (!data.ok) {
+      const data = await leerRespuesta(res);
+      if (!res.ok || !data.ok) {
         statusText.textContent = `Error en simulación: ${data.error}`;
         return;
       }
