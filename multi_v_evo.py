@@ -395,8 +395,7 @@ def _k_tiro(x, y, th, v, k, gx, gy, gth, con_ang, ang_tol,
     # frenar en la curva final (el molesto "frena y vuelve a arrancar"). Se
     # permite como mucho la velocidad de entrada, con un suelo de 0.5·vmax para
     # que no se arrastre. Solo puede FRENAR respecto a esto (para la meta o por
-    # el límite de curva), nunca superar el tope.
-    v_tope = v if v > 0.5 * vmaxc else 0.5 * vmaxc
+    v_tope = v if v >= 0.1 else vmaxc
     kk = k
     for _ in range(900):
         d = hypot(gx - x, gy - y)
@@ -417,10 +416,16 @@ def _k_tiro(x, y, th, v, k, gx, gy, gth, con_ang, ang_tol,
         else:
             tx = gx; ty = gy
         v_ant = v
-        dd = d if d > 0.0 else 0.0
-        v_des = min(vmaxc, sqrt(2.0 * amax * dd))
-        if v_des > v_tope:                    # no acelerar por encima del tope
+        da_err = abs(atan2(sin(th - gth), cos(th - gth))) if con_ang == 1 else 0.0
+        R_min = L / max(1e-3, tan(dmax))
+        d_freno = d + da_err * R_min
+        d_umbral = 2.0 * L
+        ang_ok = (con_ang == 0) or (da_err <= 1.5 * ang_tol)
+        if d_freno > d_umbral or not ang_ok:
             v_des = v_tope
+        else:
+            ratio = d_freno / d_umbral if d_freno > 0.0 else 0.0
+            v_des = sqrt(ratio) * v_tope
         dv = max(-amax * h, min(amax * h, v_des - v))
         v = min(vmaxc, max(0.0, v + dv))
         alpha = atan2(ty - y, tx - x) - th
@@ -1029,11 +1034,11 @@ class Planificador:
         # las rutas algo menos óptimas (un poco más largas), cosa asumible.
         tabla = {
             # nivel: (n_dir, ang_res, peso_h, max_nodos, rel_ini, rel_span, ang_tol_max)
-            1: (17, 12, 1.70,  800000,  8000,  40000, 0.28),
-            2: (23, 11, 1.50, 1100000, 12000,  80000, 0.23),
-            3: (31, 10, 1.35, 1600000, 15000, 120000, 0.18),
-            4: (41,  8, 1.20, 2400000, 25000, 200000, 0.14),
-            5: (55,  6, 1.08, 3600000, 40000, 350000, 0.11),
+            1: (17, 12, 1.70,  800000,  8000,  40000, 0.56),
+            2: (23, 11, 1.50, 1100000, 12000,  80000, 0.46),
+            3: (31, 10, 1.35, 1600000, 15000, 120000, 0.36),
+            4: (41,  8, 1.20, 2400000, 25000, 200000, 0.28),
+            5: (55,  6, 1.08, 3600000, 40000, 350000, 0.12),
         }
         n_dir, ang, peso, mx, r_ini, r_span, a_max = tabla.get(int(nivel), tabla[3])
         half = n_dir // 2
@@ -1335,7 +1340,7 @@ class Planificador:
                     txa = gx; tya = gy
                 alpha0 = math.atan2(tya - y, txa - x) - th
                 alpha0 = math.atan2(math.sin(alpha0), math.cos(alpha0))
-                if abs(alpha0) <= self.ang_tiro or d_goal <= self.goal_tol * 1.5:
+                if abs(alpha0) <= self.ang_tiro or (not con_ang_din and d_goal <= self.goal_tol * 1.5):
                     n, poses = _k_tiro(x, y, th, v, k, gx, gy, gth, con_ang_din, ang_tol_din,
                                        L, dmax, self.ld_tiro,
                                        self.v_max_c, self.a_max, self.goal_tol_fin,
