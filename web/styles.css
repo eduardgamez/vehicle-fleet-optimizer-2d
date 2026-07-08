@@ -77,6 +77,9 @@
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
+
+/* Barra de acceso rápido: oculta por defecto, solo se muestra en móvil */
+.quick-bar { display: none; }
 body { 
   background: var(--panelBg); 
   display: flex; 
@@ -127,19 +130,17 @@ body {
   background: var(--cardBg);
   border: 1px solid var(--cardBorder);
   border-radius: var(--cardRadius);
-  box-shadow: var(--cardShadow);
+  box-shadow: 0 0 calc(6 * 100cqh / 800) rgba(0,0,0,.16),
+              0 calc(2 * 100cqh / 800) calc(5 * 100cqh / 800) rgba(0,0,0,.14);
   position: relative;
   overflow: hidden;
   flex-shrink: 0;
 }
 
 #main-canvas {
-  position: absolute;
-  top: 0;
-  left: 0;
+  display: block;
   width: 100%;
   height: 100%;
-  display: block;
 }
 
 .textarea-card {
@@ -194,6 +195,27 @@ body {
   padding: calc(6 * 100cqh / 800) calc(12 * 100cqh / 800);
   font-size: calc(12.5 * 100cqh / 800);
   color: var(--text);
+  display: flex;
+  align-items: center;
+  gap: calc(8 * 100cqh / 800);
+}
+
+.status-spinner {
+  width: calc(13 * 100cqh / 800);
+  height: calc(13 * 100cqh / 800);
+  flex-shrink: 0;
+  border: 2px solid var(--cardBorder);
+  border-top-color: var(--text);
+  border-radius: 50%;
+  animation: status-spin 0.7s linear infinite;
+}
+
+.status-spinner[hidden] {
+  display: none;
+}
+
+@keyframes status-spin {
+  to { transform: rotate(360deg); }
 }
 
 .titlebar {
@@ -492,4 +514,188 @@ input.text-input {
   width: calc(48 * 100cqh / 800);
   font-size: calc(12 * 100cqh / 800);
   padding: calc(5 * 100cqh / 800) calc(8 * 100cqh / 800);
+}
+
+/* =========================================================================
+   LAYOUT MÓVIL
+   En pantallas estrechas (móvil/tablet en vertical) se abandona la ventana
+   fija 16:10 con panel lateral y todo se reorganiza en una única columna
+   desplazable: primero el MAPA (grande), luego los controles, la caja de
+   texto y la barra de estado. Todos los tamaños se fijan aquí en px/rem
+   para NO depender de las unidades cqh (que en el layout de escritorio se
+   referencian a una ventana de 800px), de modo que el móvil es predecible
+   e independiente de la altura del viewport.
+   ========================================================================= */
+@media (max-width: 760px) {
+  html, body {
+    height: auto;
+    min-height: 100%;
+    width: 100%;
+    overflow-x: hidden;
+    overflow-y: auto;
+    display: block;
+  }
+
+  .app-layout {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    height: auto;
+    aspect-ratio: auto;
+    container-type: normal;   /* deja de ser contenedor de consulta: los tamaños de abajo mandan */
+    padding: 10px;
+    padding-bottom: max(10px, env(safe-area-inset-bottom));
+    gap: 12px;
+  }
+
+  /* --- Orden: mapa arriba, controles debajo --- */
+  .main-content {
+    order: 1;
+    height: auto;
+    gap: 10px;
+  }
+  .panel-window {
+    order: 2;
+    width: 100%;
+    flex: none;
+    height: auto;
+  }
+
+  .panel-content {
+    padding: 0;
+    gap: 12px;
+  }
+
+  /* Las tarjetas ya no se estiran para rellenar; se ajustan a su contenido */
+  .card {
+    flex: none;
+    padding: 14px 14px;
+    gap: 12px;
+    border-radius: 14px;
+  }
+
+  .card-title .tick { width: 3px; height: 13px; border-radius: 2px; }
+  .card-title span:last-child { font-size: 13px; }
+
+  .field-row span:first-child { font-size: 15px; }
+
+  /* Inputs: 16px evita el zoom automático de iOS al enfocar */
+  input.text-input {
+    width: 84px;
+    font-size: 16px;
+    padding: 8px 10px;
+    border-radius: 8px;
+  }
+  #max-cand {
+    width: 78px;
+    font-size: 16px;
+    padding: 8px 10px;
+  }
+
+  /* --- Mapa: ocupa todo el ancho, bien grande --- */
+  .canvas-container {
+    aspect-ratio: 40 / 24;
+    width: 100%;
+    border-radius: 14px;
+    box-shadow: 0 10px 26px -6px rgba(0,0,0,.30);
+  }
+
+  /* --- Slider de calidad, táctil --- */
+  .slider-container { gap: 12px; }
+  .slider-value { font-size: 15px; }
+  .slider-track-area { height: 28px; }
+  .slider-track, .slider-fill { height: 5px; }
+  .slider-thumb {
+    width: 26px; height: 26px; margin-left: -13px;
+  }
+  .slider-labels { font-size: 12px; }
+
+  /* --- Controles segmentados --- */
+  .segmented-control {
+    height: 40px;
+    border-radius: 20px;
+    padding: 3px;
+  }
+  .segmented-thumb { top: 3px; bottom: 3px; border-radius: 17px; }
+  .segmented-control button { font-size: 14px; padding: 6px; }
+
+  /* --- Botones grandes y táctiles (mín. 44px) --- */
+  .btn { border-radius: 12px; }
+  .btn-outline { padding: 13px; font-size: 15px; min-height: 48px; }
+  .btn-primary { padding: 14px; font-size: 16px; min-height: 50px; }
+  .btn-secondary { padding: 13px; font-size: 15px; min-height: 48px; }
+  .btn-icon { height: 48px; border-radius: 12px; }
+
+  .icon-15 { width: 17px; height: 17px; }
+  .icon-13 { width: 15px; height: 15px; }
+
+  /* --- Mapa: botones en rejilla --- */
+  .map-grid { gap: 10px; }
+  .map-btn {
+    padding: 13px 12px;
+    font-size: 13.5px;
+    border-radius: 11px;
+    min-height: 48px;
+  }
+  .map-btn .icon-15 { width: 17px; height: 17px; }
+
+  /* --- Barra de acceso rápido bajo el mapa (mini botones) --- */
+  .quick-bar {
+    display: flex;
+    gap: 8px;
+    width: 100%;
+  }
+  .quick-btn {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    min-height: 40px;
+    padding: 8px 6px;
+    background: var(--btnBg);
+    color: var(--text);
+    border: none;
+    border-radius: 10px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: filter .15s;
+  }
+  .quick-btn:active { filter: brightness(0.88); }
+  .quick-btn .icon-15 { width: 15px; height: 15px; }
+  .quick-btn .icon-13 { width: 13px; height: 13px; }
+  .quick-btn-primary {
+    background: var(--primBg);
+    color: var(--primColor);
+  }
+
+  /* --- Caja de texto y estado --- */
+  .textarea-card { flex: none; padding: 14px; gap: 8px; border-radius: 14px; }
+  .textarea-label { font-size: 14px; }
+  .code-textarea {
+    font-size: 13px;
+    padding: 12px;
+    min-height: 160px;
+    border-radius: 10px;
+  }
+
+  .quick-bar { order: 1; }
+  .status-bar-container { height: auto; order: 2; }
+  .textarea-card { order: 3; }
+  .status-bar {
+    padding: 10px 14px;
+    font-size: 14px;
+    border-radius: 12px;
+    gap: 8px;
+  }
+  .status-spinner {
+    width: 14px;
+    height: 14px;
+  }
+}
+
+/* Pantallas muy pequeñas: mapa de botones a una columna cómoda */
+@media (max-width: 380px) {
+  .map-grid { grid-template-columns: 1fr; }
 }

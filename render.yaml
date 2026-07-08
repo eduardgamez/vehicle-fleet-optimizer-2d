@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: tdr-multi-vehiculo
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    # 1 SOLO worker: la app guarda estado global (env_actual, vehiculos_actuales)
+    # que se muta entre peticiones; con varios workers el estado se corrompería.
+    # Timeout alto porque la simulación evolutiva puede tardar bastante.
+    startCommand: gunicorn server:app --workers 1 --threads 1 --timeout 600 --bind 0.0.0.0:$PORT
+    envVars:
+      - key: FLASK_DEBUG
+        value: "0"
+      # Cache de compilación de Numba en una ruta escribible del contenedor.
+      - key: NUMBA_CACHE_DIR
+        value: /tmp/numba_cache

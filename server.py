@@ -32,27 +32,68 @@ def _muestrear(env, length, width, otros, sep):
             return (x, y, th)
     return None
 
-def _angulo_llegada(env, ix, iy, mx, my, length, width):
-    candidatos = [random.uniform(0, 2 * math.pi) for _ in range(25)]
-    for c in candidatos:
+def _orientaciones_libres_meta(env, mx, my, length, width, n=48):
+    """Barrido denso de orientaciones en la meta: devuelve la lista de ángulos
+    (rad) en los que el vehículo cabe. Sustituye al muestreo de 25 ángulos al
+    azar, que en plazas con una banda de orientaciones estrecha fallaba a
+    menudo y acababa marcando la llegada como "libre" justo donde MENOS margen
+    hay."""
+    libres = []
+    for i in range(n):
+        c = 2 * math.pi * i / n
         if env.libre(mx, my, c, length, width, margen=0.25):
-            return c
-    return None
+            libres.append(c)
+    return libres
+
+# Una meta se considera "holgada" (apta para llegada libre) si admite al menos
+# esta fracción de orientaciones del barrido. Por debajo de eso, la plaza es
+# demasiado ajustada para dejar el ángulo al azar del planificador: se le fija
+# un ángulo de llegada concreto y factible para que la ruta sea fiable.
+FRACCION_HOLGADA = 0.25
+PROB_LLEGADA_LIBRE = 0.4
+
+def _elegir_llegada(env, mx, my, length, width, th_fallback, n=48):
+    """Decide el ángulo de llegada de una meta:
+      · Si la plaza es holgada (muchas orientaciones caben), con probabilidad
+        PROB_LLEGADA_LIBRE se deja LIBRE (None) — ahí el planificador siempre
+        puede cuadrar una orientación.
+      · Si es ajustada, se fija un ángulo concreto y factible (nunca "libre"),
+        que es justo el caso que antes fallaba.
+    'th_fallback' es la orientación con la que se muestreó la meta (garantizada
+    factible), usada si el barrido no encontrara ninguna por discretización."""
+    libres = _orientaciones_libres_meta(env, mx, my, length, width, n)
+    if not libres:
+        return th_fallback
+    holgada = len(libres) >= max(1, int(FRACCION_HOLGADA * n))
+    if holgada and random.random() < PROB_LLEGADA_LIBRE:
+        return None
+    return random.choice(libres)
 
 def generar_especs_aleatorias(env, n):
     especs = []
-    inicios, metas = [], []
+    # OJO: se comprueba contra TODOS los puntos ya colocados (inicios Y metas
+    # de TODOS los vehículos), no solo contra los de su misma categoría. La
+    # meta de cualquier vehículo se bloquea como obstáculo permanente para
+    # los demás (bloqueos_metas), así que si el inicio de uno cae encima de
+    # la meta de otro, ese vehículo nace "atrapado" y no puede dar ni un
+    # paso: el planificador falla al instante (motivo="sin_ruta") aunque el
+    # mapa esté prácticamente vacío.
+    puntos = []
     for i in range(n):
         largo = random.uniform(1.0, 1.8)
         ancho = largo * random.uniform(0.50, 0.62)
         sep = largo * 1.6
-        ini = _muestrear(env, largo, ancho, inicios, sep)
-        met = _muestrear(env, largo, ancho, metas, sep)
-        if ini is None or met is None:
+        ini = _muestrear(env, largo, ancho, puntos, sep)
+        if ini is None:
             return None
         ix, iy, ith = ini
-        mx, my, _ = met
-        thm = _angulo_llegada(env, ix, iy, mx, my, largo, ancho)
+        puntos.append((ix, iy))
+        met = _muestrear(env, largo, ancho, puntos, sep)
+        if met is None:
+            return None
+        mx, my, mth = met
+        puntos.append((mx, my))
+        thm = _elegir_llegada(env, mx, my, largo, ancho, mth)
         th0 = ith
         especs.append({
             "id": i + 1,
@@ -69,8 +110,15 @@ def generar_especs_aleatorias(env, n):
             "grupo": random.randint(1, 2),
             "prioridad": random.randint(1, 3),
         })
-        inicios.append((ix, iy))
-        metas.append((mx, my))
+    # Numeración por PRIORIDAD: se ordena por (grupo, prioridad) ascendente y se
+    # reasignan los ids 1..n en ese orden, de modo que un vehículo con más
+    # prioridad (grupo/prioridad menor) siempre lleve un número más pequeño que
+    # otro con menos prioridad. Entre vehículos de igual grupo y prioridad
+    # (p. ej. lo que optimiza el modo global) el orden numérico es indiferente,
+    # así que se deja el de generación (sorted es estable).
+    especs.sort(key=lambda e: (e["grupo"], e["prioridad"]))
+    for i, e in enumerate(especs):
+        e["id"] = i + 1
     return especs
 
 def _veh_a_spec(v):
@@ -226,19 +274,38 @@ def mapa_cargar():
     return jsonify(obtener_estado_json(mve.TEXTO_EJEMPLO))
 
 def _reubicar(env, veh, vehiculos):
+    # Igual que en generar_especs_aleatorias: el nuevo inicio y la nueva meta
+    # deben separarse de TODOS los puntos ajenos (inicios y metas), no solo
+    # de su propia categoría, o el vehículo puede reaparecer atrapado contra
+    # la meta bloqueada de otro.
     sep = veh.length * 1.6
-    otros_ini = [v.inicio[:2] for v in vehiculos if v.idx != veh.idx]
-    otros_meta = [v.meta for v in vehiculos if v.idx != veh.idx]
-    ini = _muestrear(env, veh.length, veh.width, otros_ini, sep)
-    met = _muestrear(env, veh.length, veh.width, otros_meta, sep)
-    if ini is None or met is None:
+    otros = []
+    for v in vehiculos:
+        if v.idx == veh.idx:
+            continue
+        otros.append(v.inicio[:2])
+        otros.append(v.meta)
+    ini = _muestrear(env, veh.length, veh.width, otros, sep)
+    if ini is None:
+        return False
+    met = _muestrear(env, veh.length, veh.width, otros + [ini[:2]], sep)
+    if met is None:
         return False
     ix, iy, ith = ini
-    thm = _angulo_llegada(env, ix, iy, met[0], met[1], veh.length, veh.width)
+    thm = _elegir_llegada(env, met[0], met[1], veh.length, veh.width, met[2])
     veh.inicio = (ix, iy, ith)
     veh.meta = (met[0], met[1])
     veh.meta_th = thm
     return True
+
+#  Presupuesto de tiempo POR VEHÍCULO (segundos). El núcleo de búsqueda no
+#  vectoriza el chequeo de colisión/cinemática, así que su ritmo real es de
+#  unos pocos miles de expansiones por segundo (no cientos de miles); con un
+#  plazo compartido entre varios vehículos, los primeros de la cola podían
+#  agotarlo entero y dejar a los últimos sin tiempo para buscar siquiera un
+#  primer nodo válido, aunque su ruta fuera perfectamente posible.
+PRESUPUESTO_VEHICULO_S = 20.0
+
 
 def _ejecutar_planificacion(env, vehiculos, indices, base, calidad, modo_opt, max_cand, reubicable=False, inicios=None):
     import time
@@ -251,9 +318,9 @@ def _ejecutar_planificacion(env, vehiculos, indices, base, calidad, modo_opt, ma
     mejor = None
     for oi, orden in enumerate(ordenes):
         pl.max_exp = cap_prev
-        pl.deadline = time.perf_counter() + max(15.0, 5.0 * n)
         trays, motivos, coste = mve.planificar_orden(
-            pl, vehiculos, orden, base, inicios=inicios
+            pl, vehiculos, orden, base, inicios=inicios,
+            deadline_dur=PRESUPUESTO_VEHICULO_S
         )
         fallos = sum(1 for i in orden if trays[i] is None)
         if mejor is None or (fallos, coste) < (mejor[0], mejor[1]):
@@ -274,13 +341,26 @@ def _ejecutar_planificacion(env, vehiculos, indices, base, calidad, modo_opt, ma
                 continue
             veh = vehiculos[i]
             pl.max_exp = max(cap_prev, 3000000)
-            pl.deadline = time.perf_counter() + 8.0
+            pl.deadline = time.perf_counter() + PRESUPUESTO_VEHICULO_S
             pl.bloqueos = mve.bloqueos_metas(vehiculos, orden, excepto=i)
             ini = inicios.get(i) if inicios else None
             traj = pl.planificar(veh, reservas, inicio=ini)
             motivos[i] = pl.motivo
+
+            # "sin_ruta" == el punto de partida/plaza está realmente atrapado
+            # (típicamente porque cae sobre la meta bloqueada de otro
+            # vehículo): reubicar sirve. "limite" == la búsqueda se queda sin
+            # tiempo/nodos, algo mucho más probable cuando el ÁNGULO DE
+            # LLEGADA exigido obliga a una maniobra de varios tramos que el
+            # conector reversible no cubre en un solo intento; ahí reubicar
+            # una y otra vez (cada intento con su propio presupuesto) solo
+            # desperdicia tiempo, porque el problema no es la posición.
+            # Presupuesto reducido para los reintentos de reubicación: si la
+            # nueva posición vuelve a estar atrapada, conviene averiguarlo
+            # rápido y probar otra, en vez de agotar el presupuesto completo
+            # en cada intento (antes: hasta 6 × 20 s = 2 min solo en esto).
             intentos = 0
-            while (pl.motivo == "sin_ruta" and reubicable and inicios is None and intentos < 6):
+            while (pl.motivo == "sin_ruta" and reubicable and inicios is None and intentos < 3):
                 if not _reubicar(env, veh, vehiculos):
                     break
                 pl.deadline = time.perf_counter() + 8.0
@@ -288,6 +368,19 @@ def _ejecutar_planificacion(env, vehiculos, indices, base, calidad, modo_opt, ma
                 traj = pl.planificar(veh, reservas)
                 motivos[i] = pl.motivo
                 intentos += 1
+
+            if (traj is None or len(traj) < 2) and veh.meta_th is not None:
+                # Último recurso: antes de dejar el vehículo sin ruta
+                # ("aparcado"), se reintenta UNA vez con el ángulo de llegada
+                # libre. Es preferible llegar sin la orientación exacta que
+                # no llegar, y evita agotar el presupuesto reubicando cuando
+                # el problema real es el ángulo, no la posición.
+                veh.meta_th = None
+                pl.deadline = time.perf_counter() + PRESUPUESTO_VEHICULO_S
+                pl.bloqueos = mve.bloqueos_metas(vehiculos, orden, excepto=i)
+                traj = pl.planificar(veh, reservas, inicio=ini)
+                motivos[i] = pl.motivo
+
             if traj is not None and len(traj) >= 2:
                 trays[i] = traj
                 motivos[i] = "ok"
@@ -486,6 +579,8 @@ def nuevas_rutas():
     })
 
 if __name__ == "__main__":
-    print("Servidor listo en http://localhost:5050")
-    app.run(host="0.0.0.0", port=5050, debug=True)
+    port = int(os.environ.get("PORT", 5050))
+    debug = os.environ.get("FLASK_DEBUG", "1") == "1"
+    print(f"Servidor listo en http://localhost:{port}")
+    app.run(host="0.0.0.0", port=port, debug=debug)
 

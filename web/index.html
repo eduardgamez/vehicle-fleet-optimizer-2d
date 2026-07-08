@@ -2,7 +2,7 @@
 <html lang="es">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Optimizador de Flotas - Panel</title>
   <link rel="stylesheet" href="styles.css">
 </head>
@@ -158,8 +158,29 @@
       <canvas id="main-canvas"></canvas>
     </div>
 
+    <!-- Barra de acceso rápido (solo móvil): duplica los botones clave
+         justo debajo del mapa. No sustituyen a los del panel de abajo. -->
+    <div class="quick-bar" id="quick-bar">
+      <button class="quick-btn" id="q-insertar">
+        <svg class="icon-15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M3 13h11V7H3z"></path>
+          <path d="M14 10h4l3 3v3h-7z"></path>
+          <circle cx="7" cy="17.5" r="1.6"></circle>
+          <circle cx="17" cy="17.5" r="1.6"></circle>
+        </svg><span>Insertar</span>
+      </button>
+      <button class="quick-btn quick-btn-primary" id="q-simular">
+        <svg class="icon-13" viewBox="0 0 24 24" fill="currentColor"><path d="M7 4.5v15l12-7.5z"></path></svg><span>Simular</span>
+      </button>
+      <button class="quick-btn" id="q-reproducir">
+        <svg class="icon-15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M3 12a9 9 0 1 0 3-6.7"></path><path d="M3 3v4.5h4.5"></path>
+        </svg><span>Reproducir</span>
+      </button>
+    </div>
+
     <div class="textarea-card">
-      <div class="textarea-label">Vehículos manuales / nuevas rutas (lista de diccionarios; ángulos en grados):</div>
+      <div class="textarea-label">Instrucciones manuales o rutas nuevas</div>
       <textarea id="vehiculos-input" class="code-textarea" spellcheck="false">[
  {"id": 1, "inicio": [3, 3],  "giro_inicial": 0,  "meta": [36, 20],
   "angulo_llegada": 90, "largo": 1.6, "ancho": 0.8, "v_max": 3.0,
@@ -171,6 +192,7 @@
     </div>
     <div class="status-bar-container">
       <div class="status-bar">
+        <span id="status-spinner" class="status-spinner" hidden></span>
         <span id="status-text">Listo. Ajusta parámetros y genera vehículos.</span>
       </div>
     </div>

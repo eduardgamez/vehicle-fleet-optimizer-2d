@@ -92,6 +92,14 @@ import numpy as np
 from numba import njit
 
 
+# Acoplamiento giro–velocidad: el ángulo de dirección efectivo se reduce
+# linealmente con la rapidez. A velocidad máxima el volante llega a
+# (1 - STEER_SPEED_C) del tope; a coche parado, al tope entero. Es un efecto
+# LIGERO (como en la vida real: a más velocidad, menos giro para no derrapar),
+# no un límite agresivo.
+STEER_SPEED_C = 0.35
+
+
 # --------------------------------------------------------------------------- #
 # Mundo (en metros) y dibujo
 # --------------------------------------------------------------------------- #
@@ -255,14 +263,17 @@ def _k_hits_dyn(x, y, th, kk, Ld, Wd, rx, roff, rlen, rlw, R, diag, mdin):
 
 
 @njit(cache=True)
-def _k_expand(x0, y0, th0, v0, k, acc, dtan, subpasos, h, L,
+def _k_expand(x0, y0, th0, v0, k, acc, dl, subpasos, h, L,
               vmaxc, vrev, veh_len, veh_wid, margin, mdin, diag,
               worldW, worldH, oc, oax, obb, K, blc, blax, blbb, B,
               rx, roff, rlen, rlw, R, feas, osub, ov):
     """Evalúa TODAS las acciones (accel, delta) de un nodo. Para cada acción integra
     los 'subpasos' del modelo de bicicleta y valida en cada subpaso los obstáculos
     fijos, las metas bloqueadas y las reservas dinámicas. Rellena, por acción a:
-    feas[a] = 1/0,  osub[a] = subposes,  ov[a] = velocidad final."""
+    feas[a] = 1/0,  osub[a] = subposes,  ov[a] = velocidad final.
+
+    'dl' son los ÁNGULOS de dirección (rad) de cada acción; el ángulo efectivo
+    en cada subpaso se reduce con la rapidez (acoplamiento giro–velocidad)."""
     A = acc.shape[0]
     Lm = veh_len + 2.0 * margin
     Wm = veh_wid + 2.0 * margin
@@ -271,9 +282,11 @@ def _k_expand(x0, y0, th0, v0, k, acc, dtan, subpasos, h, L,
     for a in range(A):
         x = x0; y = y0; th = th0; v = v0
         ok = 1
-        ac = acc[a]; dtn = dtan[a]
+        ac = acc[a]; dl_a = dl[a]
         for sp in range(subpasos):
             v = min(vmaxc, max(-vrev, v + ac * h))
+            av = v if v >= 0.0 else -v
+            dtn = tan(dl_a * (1.0 - STEER_SPEED_C * (av / vmaxc)))
             th = th + (1.0 / L) * dtn * (v * h)
             x = x + cos(th) * v * h
             y = y + sin(th) * v * h
@@ -356,7 +369,9 @@ def _k_tiro(x, y, th, v, k, gx, gy, gth, con_ang, ang_tol,
         den = dt_ if dt_ < ld else ld
         if den < 1e-3:
             den = 1e-3
-        delta = max(-dmax, min(dmax, atan2(2.0 * L * sin(alpha), den)))
+        # Tope de dirección reducido con la rapidez (giro–velocidad).
+        dmax_v = dmax * (1.0 - STEER_SPEED_C * (v / vmaxc))
+        delta = max(-dmax_v, min(dmax_v, atan2(2.0 * L * sin(alpha), den)))
         th = th + (1.0 / L) * tan(delta) * (v * h)
         x = x + cos(th) * v * h
         y = y + sin(th) * v * h
@@ -414,22 +429,28 @@ def _k_maniobra(x, y, th, k, gx, gy, gth, ang_tol,
     Wm = veh_wid + 2.0 * margin
     dirs = (1.0, -1.0)                        # adelante / marcha atrás
     steers = (-1.0, -0.5, 0.0, 0.5, 1.0)     # fracción del giro máximo
-    seg_max = 30                             # subpasos máximos del primer tramo
+    seg_max = 30                             # subpasos máximos del tramo de ida
+    tail_max = 70                            # subpasos máximos del frenado
     v_man = 0.5 * vmaxc
     if v_man < 0.5:
         v_man = 0.5
     best_n = -1
     best_total = 1e18
-    seg = np.empty((seg_max, 3))
+    # Segmento = rampa de aceleración (prefijo compartido) + cola de frenado.
+    seg = np.empty((seg_max + tail_max, 3))
     for di in range(2):
         dirf = dirs[di]
         for si in range(5):
-            tdel = tan(steers[si] * dmax)
+            frac = steers[si]
             x1 = x; y1 = y; th1 = th
             kk = k
+            vmag = 0.0                       # arranca PARADO: sin salto de velocidad
             for step in range(seg_max):
-                vv = dirf * v_man
-                th1 = th1 + (1.0 / L) * tdel * (vv * h)
+                # Acelera desde 0 respetando a_max (hasta el tope de maniobra).
+                vmag = min(v_man, vmag + amax * h)
+                vv = dirf * vmag
+                fdel = tan(frac * dmax * (1.0 - STEER_SPEED_C * (vmag / vmaxc)))
+                th1 = th1 + (1.0 / L) * fdel * (vv * h)
                 x1 = x1 + cos(th1) * vv * h
                 y1 = y1 + sin(th1) * vv * h
                 kk += 1
@@ -440,18 +461,47 @@ def _k_maniobra(x, y, th, k, gx, gy, gth, ang_tol,
                                rx, roff, rlen, rlw, R, diag, mdin):
                     break
                 seg[step, 0] = x1; seg[step, 1] = y1; seg[step, 2] = th1
-                nseg = step + 1
-                if (step & 1) != 0:          # remata cada 2 subpasos (ahorra coste)
+                ncore = step + 1
+                if (step & 1) != 0:          # prueba a rematar cada 2 subpasos
                     continue
-                # Desde el fin del tramo (coche detenido) intenta el remate normal.
-                nt, pt = _k_tiro(x1, y1, th1, 0.0, kk, gx, gy, gth, 1, ang_tol,
+                # COLA DE FRENADO: decelera hasta v=0 (respetando a_max) antes de
+                # cambiar de sentido, para que la inversión pase por velocidad
+                # nula y no haya un salto brusco. La pose final queda DETENIDA.
+                xt = x1; yt = y1; tht = th1; kt = kk; vt = vmag
+                ntail = 0
+                tail_ok = True
+                while vt > 1e-3 and ntail < tail_max:
+                    vt = vt - amax * h
+                    if vt < 0.0:
+                        vt = 0.0
+                    vvt = dirf * vt
+                    fdt = tan(frac * dmax * (1.0 - STEER_SPEED_C * (vt / vmaxc)))
+                    tht = tht + (1.0 / L) * fdt * (vvt * h)
+                    xt = xt + cos(tht) * vvt * h
+                    yt = yt + sin(tht) * vvt * h
+                    kt += 1
+                    if not _k_free_sb(xt, yt, tht, Lm, Wm, worldW, worldH,
+                                      oc, oax, obb, K, blc, blax, blbb, B, diag, margin):
+                        tail_ok = False; break
+                    if _k_hits_dyn(xt, yt, tht, kt, Ld, Wd,
+                                   rx, roff, rlen, rlw, R, diag, mdin):
+                        tail_ok = False; break
+                    seg[ncore + ntail, 0] = xt
+                    seg[ncore + ntail, 1] = yt
+                    seg[ncore + ntail, 2] = tht
+                    ntail += 1
+                if not tail_ok:
+                    continue
+                nseg = ncore + ntail
+                # Desde el fin del tramo (coche DETENIDO) intenta el remate normal.
+                nt, pt = _k_tiro(xt, yt, tht, 0.0, kt, gx, gy, gth, 1, ang_tol,
                                  L, dmax, ld, vmaxc, amax, goal_tol, v_tol, h,
                                  veh_len, veh_wid, margin, mdin, diag, worldW, worldH,
                                  oc, oax, obb, K, blc, blax, blbb, B,
                                  rx, roff, rlen, rlw, R)
                 if nt <= 0:
                     continue
-                kfin = kk + nt
+                kfin = kt + nt
                 kmax = kfin if kfin > res_maxlen else res_maxlen
                 if not _k_aparca(pt[nt - 1, 0], pt[nt - 1, 1], pt[nt - 1, 2],
                                  kfin, kmax, Ld, Wd,
@@ -854,8 +904,18 @@ class Planificador:
         # Conector reversible: entra en acción solo cuando la búsqueda se atasca
         # asentando el ángulo de llegada (más nodos que 'umbral_maniobra'), y como
         # mucho una vez cada 'paso_maniobra' expansiones para no encarecerla.
-        self.umbral_maniobra = 80_000
-        self.paso_maniobra = 1500
+        #
+        # NOTA DE CALIBRACIÓN: el ritmo real de expansión del núcleo (con SAT +
+        # modelo de bicicleta en Python/Numba, sin vectorizar) ronda unos pocos
+        # miles de nodos/s, no cientos de miles. Con el umbral antiguo (80 000)
+        # la búsqueda tardaba 20-30 s en siquiera INTENTAR el conector reversible,
+        # y con angulo_llegada exigido (el caso más común, ya que el generador
+        # aleatorio casi siempre pide un ángulo concreto) la búsqueda estándar
+        # rara vez lo resuelve sola: el resultado era agotar el presupuesto de
+        # tiempo/expansiones sin ruta, dejando vehículos «aparcados» sin más.
+        # Bajarlo deja que el conector entre en juego mucho antes.
+        self.umbral_maniobra = 3_000
+        self.paso_maniobra = 600
         self._exp_ult_maniobra = 0
 
     def configurar_calidad(self, nivel):
@@ -1070,7 +1130,6 @@ class Planificador:
         A = len(acciones)
         acc = np.array([ac for ac, _ in acciones], dtype=np.float64)
         dl = np.array([d for _, d in acciones], dtype=np.float64)
-        dtan = np.tan(dl)
 
         oc, oax, obb = self.env.np_c, self.env.np_ax, self.env.np_bb
         K = oc.shape[0]
@@ -1197,7 +1256,7 @@ class Planificador:
                 continue
 
             dprev = delta_prev.get(cid, 0.0)
-            _k_expand(x, y, th, v, k, acc, dtan, ns, h, L,
+            _k_expand(x, y, th, v, k, acc, dl, ns, h, L,
                       self.v_max_c, self.v_rev, self._len, self._wid,
                       self.margen, self.margen_din, self.diag, W, H,
                       oc, oax, obb, K, blc, blax, blbb, B,
@@ -1258,9 +1317,9 @@ def warmup():
     eb, ebb = _EMPTY_C, _EMPTY_BB
     rx = np.array([[5.0, 5.0, 0.0]]); roff = np.array([0], np.int64)
     rlen = np.array([1], np.int64); rlw = np.array([[1.3, 0.7]])
-    acc = np.array([1.0, 0.0]); dtan = np.tan(np.array([0.1, -0.1]))
+    acc = np.array([1.0, 0.0]); dl = np.array([0.1, -0.1])
     feas = np.empty(2, np.int8); osub = np.empty((2, 4, 3)); ov = np.empty(2)
-    _k_expand(2.0, 2.0, 0.0, 0.0, 0, acc, dtan, 4, 0.1, 0.7,
+    _k_expand(2.0, 2.0, 0.0, 0.0, 0, acc, dl, 4, 0.1, 0.7,
               2.5, 1.25, 1.3, 0.7, 0.1, 0.15, 1.48, W, H,
               oc, oax, obb, 1, eb, eb, ebb, 0, rx, roff, rlen, rlw, 1, feas, osub, ov)
     _k_tiro(2.0, 2.0, 0.0, 0.0, 0, 6.0, 6.0, 0.0, 1, 0.2,
@@ -1380,12 +1439,21 @@ def bloqueos_metas(vehiculos, indices, excepto):
 
 
 def planificar_orden(planificador, vehiculos, orden, reservas_base,
-                     inicios=None, tick_veh=None):
+                     inicios=None, tick_veh=None, deadline_dur=None):
     """Planifica cooperativamente los vehículos de 'orden' (índices) sobre las
     reservas base (p. ej. vehículos aparcados de misiones anteriores).
 
     'inicios' (dict idx → pose) permite arrancar cada vehículo desde una pose
     distinta de su inicio nominal (misiones nuevas desde la plaza actual).
+
+    'deadline_dur', si se indica, es el presupuesto de tiempo (segundos) POR
+    VEHÍCULO: se renueva justo antes de planificar cada uno. Sin esto, un
+    'planificador.deadline' fijado por el llamador ANTES de la llamada queda
+    compartido entre todos los vehículos del orden, de modo que los primeros
+    (más fáciles, o simplemente los primeros en la cola) pueden agotar el
+    plazo entero y dejar a los últimos sin apenas tiempo para buscar —el
+    síntoma es que, con varios vehículos, solo los primeros consiguen ruta y
+    el resto se queda "aparcado" aunque exista solución.
 
     Devuelve (trayectorias, motivos, coste): dicts idx → traj / motivo, y el
     coste total de flota (suma de duraciones + penalización por fallo)."""
@@ -1398,6 +1466,8 @@ def planificar_orden(planificador, vehiculos, orden, reservas_base,
         if tick_veh is not None:
             tick_veh(pos, idx)
         planificador.bloqueos = bloqueos_metas(vehiculos, orden, excepto=idx)
+        if deadline_dur is not None:
+            planificador.deadline = time.perf_counter() + deadline_dur
         ini = inicios.get(idx) if inicios else None
         traj = planificador.planificar(veh, reservas, inicio=ini)
         motivos[idx] = planificador.motivo

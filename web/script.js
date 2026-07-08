@@ -50,6 +50,10 @@ document.addEventListener('DOMContentLoaded', () => {
   const maxCandInput = document.getElementById('max-cand');
   const vehiculosInput = document.getElementById('vehiculos-input');
   const statusText = document.getElementById('status-text');
+  const statusSpinner = document.getElementById('status-spinner');
+  const setLoading = (loading) => {
+    if (statusSpinner) statusSpinner.hidden = !loading;
+  };
 
   const canvas = document.getElementById('main-canvas');
   const ctx = canvas ? canvas.getContext('2d') : null;
@@ -57,7 +61,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // Setup Canvas para agudeza Retina
   const setupCanvas = () => {
     if (!canvas || !ctx) return;
-    const rect = canvas.parentElement.getBoundingClientRect();
+    const rect = canvas.getBoundingClientRect();
     const dpr = window.devicePixelRatio || 1;
     canvas.width = rect.width * dpr;
     canvas.height = rect.height * dpr;
@@ -173,21 +177,21 @@ document.addEventListener('DOMContentLoaded', () => {
       ctx.strokeStyle = color;
       ctx.lineWidth = 2;
       ctx.beginPath();
-      ctx.arc(mx * scale + offsetX, my * scale + offsetY, 7, 0, Math.PI * 2);
+      ctx.arc(mx * scale + offsetX, my * scale + offsetY, 4.5, 0, Math.PI * 2);
       ctx.stroke();
 
       // Flecha de ángulo de llegada si existe
       if (v.meta_th !== null && v.meta_th !== undefined) {
-        const ax = mx + 1.2 * Math.cos(v.meta_th);
-        const ay = my + 1.2 * Math.sin(v.meta_th);
+        const ax = mx + 0.5 * Math.cos(v.meta_th);
+        const ay = my + 0.5 * Math.sin(v.meta_th);
         ctx.strokeStyle = color;
-        ctx.lineWidth = 2;
+        ctx.lineWidth = 1.5;
         ctx.beginPath();
         ctx.moveTo(mx * scale + offsetX, my * scale + offsetY);
         ctx.lineTo(ax * scale + offsetX, ay * scale + offsetY);
         ctx.stroke();
 
-        const headlen = 5;
+        const headlen = 3;
         const angle = v.meta_th;
         ctx.beginPath();
         ctx.moveTo(ax * scale + offsetX, ay * scale + offsetY);
@@ -239,12 +243,14 @@ document.addEventListener('DOMContentLoaded', () => {
       ctx.fill();
       ctx.stroke();
 
-      // Indicador frontal blanco
+      // Indicador de dirección: trazo corto con la punta pegada al borde
+      // frontal del rectángulo. No arranca del centro para no cruzar por
+      // encima del número del vehículo y dejarlo legible.
       ctx.strokeStyle = '#ffffff';
-      ctx.lineWidth = 2;
+      ctx.lineWidth = 1.5;
       ctx.beginPath();
-      ctx.moveTo(0, 0);
-      ctx.lineTo(lPx * 0.36, 0);
+      ctx.moveTo(lPx * 0.32, 0);
+      ctx.lineTo(lPx * 0.5, 0);
       ctx.stroke();
       ctx.restore();
 
@@ -261,6 +267,27 @@ document.addEventListener('DOMContentLoaded', () => {
   };
 
   // --- Bucle de Animación ---
+  // Un ÚNICO bucle de requestAnimationFrame a la vez. Arrancar la reproducción
+  // sin cancelar antes el bucle anterior dejaba dos (o más) bucles corriendo en
+  // paralelo, y cada uno avanzaba el fotograma una vez por refresco → el doble
+  // de velocidad ("cámara rápida"). Todo arranque pasa por iniciarReproduccion,
+  // que primero cancela cualquier bucle vivo, de modo que nunca se solapan.
+  const mostrarPausa = () => {
+    if (iconPlay) iconPlay.classList.add('icon-hidden');
+    if (iconPause) iconPause.classList.remove('icon-hidden');
+  };
+  const mostrarPlay = () => {
+    if (iconPause) iconPause.classList.add('icon-hidden');
+    if (iconPlay) iconPlay.classList.remove('icon-hidden');
+  };
+
+  const detenerAnim = () => {
+    if (state.animId) {
+      cancelAnimationFrame(state.animId);
+      state.animId = null;
+    }
+  };
+
   const animStep = () => {
     if (!state.playing) return;
     drawScene();
@@ -270,38 +297,41 @@ document.addEventListener('DOMContentLoaded', () => {
       state.animId = requestAnimationFrame(animStep);
     } else {
       state.playing = false;
-      if (iconPause) iconPause.classList.add('icon-hidden');
-      if (iconPlay) iconPlay.classList.remove('icon-hidden');
+      state.animId = null;
+      mostrarPlay();
     }
   };
 
+  const iniciarReproduccion = (desdeInicio) => {
+    detenerAnim();                       // garantiza un solo bucle activo
+    if (desdeInicio) state.frameIndex = 0;
+    state.playing = true;
+    mostrarPausa();
+    state.animId = requestAnimationFrame(animStep);
+  };
+
   btnPlay?.addEventListener('click', () => {
-    state.playing = !state.playing;
     if (state.playing) {
-      if (iconPlay) iconPlay.classList.add('icon-hidden');
-      if (iconPause) iconPause.classList.remove('icon-hidden');
-      state.animId = requestAnimationFrame(animStep);
+      state.playing = false;
+      detenerAnim();
+      mostrarPlay();
     } else {
-      if (iconPause) iconPause.classList.add('icon-hidden');
-      if (iconPlay) iconPlay.classList.remove('icon-hidden');
-      if (state.animId) cancelAnimationFrame(state.animId);
+      // Si ya estaba al final, reanudar equivale a reproducir desde el inicio.
+      const alFinal = state.frames && state.frameIndex >= state.frames.length - 1;
+      iniciarReproduccion(alFinal);
     }
   });
 
   btnRestart?.addEventListener('click', () => {
     state.playing = false;
-    if (iconPause) iconPause.classList.add('icon-hidden');
-    if (iconPlay) iconPlay.classList.remove('icon-hidden');
+    detenerAnim();
+    mostrarPlay();
     state.frameIndex = 0;
     drawScene();
   });
 
   btnReproducir?.addEventListener('click', () => {
-    state.frameIndex = 0;
-    state.playing = true;
-    if (iconPlay) iconPlay.classList.add('icon-hidden');
-    if (iconPause) iconPause.classList.remove('icon-hidden');
-    state.animId = requestAnimationFrame(animStep);
+    iniciarReproduccion(true);
   });
 
   // --- Inicialización del Mapa y Estado ---
@@ -349,11 +379,18 @@ document.addEventListener('DOMContentLoaded', () => {
       state.frames = [];
       state.frameIndex = 0;
       if (data.mundo) state.mundo = data.mundo;
+      // Reescribe la caja de texto con la definición de los vehículos recién
+      // generados (o con el texto normalizado por el servidor en modo manual),
+      // para que refleje siempre el estado real y sea editable/reutilizable.
       if (data.texto && vehiculosInput) {
         vehiculosInput.value = data.texto;
       }
 
-      statusText.textContent = `${state.vehiculos.length} vehículos cargados/generados. Pulsa «Simular».`;
+      const sufijo = state.source === 'aleatorio'
+        ? ' La caja de texto muestra sus datos.'
+        : '';
+      statusText.textContent =
+        `${state.vehiculos.length} vehículos cargados/generados. Pulsa «Simular».${sufijo}`;
       drawScene();
     } catch (err) {
       statusText.textContent = `Error de red: ${err.message}`;
@@ -473,6 +510,7 @@ document.addEventListener('DOMContentLoaded', () => {
       await generarVehiculos();
     }
     statusText.textContent = "Calculando rutas optimizadas en Python...";
+    setLoading(true);
     try {
       const res = await fetch('/api/simular', {
         method: 'POST',
@@ -491,15 +529,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
       state.trayectorias = data.trayectorias || [];
       state.frames = data.frames || [];
-      state.frameIndex = 0;
-      state.playing = true;
-      if (iconPlay) iconPlay.classList.add('icon-hidden');
-      if (iconPause) iconPause.classList.remove('icon-hidden');
 
       statusText.textContent = "¡Simulación en curso!";
-      state.animId = requestAnimationFrame(animStep);
+      iniciarReproduccion(true);
     } catch (err) {
       statusText.textContent = `Error de simulación: ${err.message}`;
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -508,6 +544,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // --- Nuevas Rutas ---
   btnNuevasRutas?.addEventListener('click', async () => {
     statusText.textContent = "Calculando nuevas rutas para vehículos del texto...";
+    setLoading(true);
     try {
       const res = await fetch('/api/nuevas_rutas', {
         method: 'POST',
@@ -528,15 +565,24 @@ document.addEventListener('DOMContentLoaded', () => {
       state.vehiculos = data.vehiculos || state.vehiculos;
       state.trayectorias = data.trayectorias || [];
       state.frames = data.frames || [];
-      state.frameIndex = 0;
-      state.playing = true;
-      if (iconPlay) iconPlay.classList.add('icon-hidden');
-      if (iconPause) iconPause.classList.remove('icon-hidden');
 
       statusText.textContent = "¡Simulación de nuevas rutas en curso!";
-      state.animId = requestAnimationFrame(animStep);
+      iniciarReproduccion(true);
     } catch (err) {
       statusText.textContent = `Error: ${err.message}`;
+    } finally {
+      setLoading(false);
+    }
+  });
+
+  // --- Barra de acceso rápido (móvil): reutilizan las mismas acciones ---
+  document.getElementById('q-insertar')?.addEventListener('click', generarVehiculos);
+  document.getElementById('q-simular')?.addEventListener('click', simularFlota);
+  document.getElementById('q-reproducir')?.addEventListener('click', () => {
+    if (state.frames && state.frames.length > 0) {
+      iniciarReproduccion(true);
+    } else {
+      simularFlota();
     }
   });
 
