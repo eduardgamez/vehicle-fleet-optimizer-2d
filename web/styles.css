@@ -1,0 +1,370 @@
+:root {
+  --winBg: #ffffff;
+  --winBorder: #e0e0e5;
+  --winShadow: 0 30px 70px -28px rgba(0,0,0,.32);
+  --barBg: #f6f6f8;
+  --barBorder: #e3e3e6;
+  --barTitle: #1d1d1f;
+  --panelBg: #f2f2f7;
+  --cardBg: #ffffff;
+  --cardBorder: #e6e6ea;
+  --cardRadius: 12px;
+  --cardShadow: 0 1px 2px rgba(0,0,0,.05);
+  --text: #1d1d1f;
+  --muted: #86868b;
+  --tick: #1d1d1f;
+  --titleColor: #5c5c62;
+  --titleTransform: uppercase;
+  --titleSize: 12px;
+  --titleWeight: 600;
+  --titleSpacing: .05em;
+  --fieldBg: #eceef2;
+  --fieldColor: #1d1d1f;
+  --accent: #007aff;
+  --sliderTrack: rgba(120,120,128,.22);
+  --sliderFill: #007aff;
+  --sliderVal: #007aff;
+  --segTrackBg: #e9e9eb;
+  --segThumb: #ffffff;
+  --segThumbShadow: 0 3px 8px rgba(0,0,0,.12),0 1px 1px rgba(0,0,0,.04);
+  --segSel: #1d1d1f;
+  --segUnsel: #6e6e73;
+  --insBg: rgba(0,122,255,.12);
+  --insBgHover: rgba(0,122,255,.20);
+  --insColor: #007aff;
+  --primBg: #007aff;
+  --primColor: #ffffff;
+  --btnBg: #e6e6eb;
+  --mapTileBg: #eceef2;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --winBg: #1c1c1e;
+    --winBorder: rgba(0,0,0,.6);
+    --winShadow: 0 30px 70px -26px rgba(0,0,0,.7);
+    --barBg: #2c2c2e;
+    --barBorder: rgba(255,255,255,.08);
+    --barTitle: #f5f5f7;
+    --panelBg: #1c1c1e;
+    --cardBg: #2c2c2e;
+    --cardBorder: rgba(255,255,255,.06);
+    --cardRadius: 12px;
+    --cardShadow: none;
+    --text: #f5f5f7;
+    --muted: #8e8e93;
+    --tick: #f5f5f7;
+    --titleColor: #8e8e93;
+    --fieldBg: #3a3a3c;
+    --fieldColor: #f5f5f7;
+    --accent: #0a84ff;
+    --sliderTrack: rgba(120,120,128,.32);
+    --sliderFill: #0a84ff;
+    --sliderVal: #0a84ff;
+    --segTrackBg: #1c1c1e;
+    --segThumb: #636366;
+    --segThumbShadow: 0 3px 8px rgba(0,0,0,.4);
+    --segSel: #ffffff;
+    --segUnsel: #aeaeb2;
+    --insBg: rgba(10,132,255,.22);
+    --insBgHover: rgba(10,132,255,.32);
+    --insColor: #4aa3ff;
+    --primBg: #0a84ff;
+    --primColor: #ffffff;
+    --btnBg: #3a3a3c;
+    --mapTileBg: #3a3a3c;
+  }
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { 
+  background: var(--panelBg); 
+  display: flex; 
+  align-items: center; 
+  justify-content: center; 
+  min-height: 100vh; 
+  font-family: -apple-system, 'SF Pro Text', system-ui, 'Segoe UI', sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+.panel-window {
+  width: 330px;
+  background: var(--panelBg);
+  overflow: hidden;
+}
+
+.titlebar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 40px;
+  padding: 0 13px;
+  background: var(--barBg);
+  border-bottom: 1px solid var(--barBorder);
+}
+
+.titlebar .window-controls {
+  display: flex;
+  gap: 7px;
+}
+
+.titlebar .window-controls span {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+}
+
+.titlebar .window-controls span:nth-child(1) { background: #ff5f57; }
+.titlebar .window-controls span:nth-child(2) { background: #febc2e; }
+.titlebar .window-controls span:nth-child(3) { background: #28c840; }
+
+.titlebar .title-text {
+  font-weight: 600;
+  font-size: 12.5px;
+  color: var(--barTitle);
+}
+
+.panel-content {
+  background: var(--panelBg);
+  padding: 14px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.card {
+  background: var(--cardBg);
+  border: 1px solid var(--cardBorder);
+  border-radius: var(--cardRadius);
+  box-shadow: var(--cardShadow);
+  padding: 13px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+}
+
+.card-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.card-title .tick {
+  width: 3px;
+  height: 12px;
+  border-radius: 2px;
+  background: var(--tick);
+}
+
+.card-title span:last-child {
+  font-size: var(--titleSize);
+  font-weight: var(--titleWeight);
+  letter-spacing: var(--titleSpacing);
+  text-transform: var(--titleTransform);
+  color: var(--titleColor);
+}
+
+.field-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.field-row span:first-child {
+  font-size: 12.5px;
+  color: var(--text);
+}
+
+input.text-input {
+  width: 52px;
+  padding: 6px 9px;
+  background: var(--fieldBg);
+  border: none;
+  border-radius: 7px;
+  color: var(--fieldColor);
+  font-size: 12.5px;
+  text-align: right;
+  outline: none;
+}
+
+.slider-container {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.slider-value {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--sliderVal);
+}
+
+.slider-track-area {
+  position: relative;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  touch-action: none;
+}
+
+.slider-track {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 4px;
+  background: var(--sliderTrack);
+  border-radius: 999px;
+}
+
+.slider-fill {
+  position: absolute;
+  left: 0;
+  height: 4px;
+  background: var(--sliderFill);
+  border-radius: 999px;
+}
+
+.slider-thumb {
+  position: absolute;
+  width: 20px;
+  height: 20px;
+  margin-left: -10px;
+  background: #ffffff;
+  border-radius: 50%;
+  box-shadow: 0 0.5px 2px rgba(0,0,0,.12), 0 3px 8px rgba(0,0,0,.2);
+}
+
+.slider-labels {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.segmented-control {
+  position: relative;
+  display: flex;
+  background: var(--segTrackBg);
+  border-radius: 17px;
+  padding: 2px;
+}
+
+.segmented-thumb {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  background: var(--segThumb);
+  border-radius: 15px;
+  box-shadow: var(--segThumbShadow);
+  transition: left .26s cubic-bezier(.4,0,.2,1);
+}
+
+.segmented-control button {
+  flex: 1;
+  position: relative;
+  z-index: 1;
+  padding: 6px 4px;
+  background: transparent;
+  border: none;
+  border-radius: 7px;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--segUnsel);
+  cursor: pointer;
+  transition: color .26s cubic-bezier(.4,0,.2,1);
+  white-space: nowrap;
+}
+
+.segmented-control button.active {
+  font-weight: 600;
+  color: var(--segSel);
+}
+
+.btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border: none;
+  border-radius: 11px;
+  cursor: pointer;
+  transition: filter .15s;
+}
+
+.btn:hover {
+  filter: brightness(0.9);
+}
+
+.btn-primary:hover {
+  filter: brightness(1.15);
+}
+
+.btn-outline {
+  width: 100%;
+  padding: 11px;
+  background: var(--insBg);
+  color: var(--insColor);
+  font-size: 13px;
+  font-weight: 600;
+  transition: all 0.2s ease;
+}
+
+.btn-outline:hover {
+  background: var(--insBgHover);
+  color: var(--insColor);
+}
+
+.btn-primary {
+  width: 100%;
+  padding: 12px;
+  background: var(--primBg);
+  color: var(--primColor);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.btn-secondary {
+  width: 100%;
+  padding: 10px;
+  background: var(--btnBg);
+  color: var(--insColor);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.btn-icon {
+  flex: 1;
+  height: 38px;
+  background: var(--btnBg);
+  color: var(--text);
+  border-radius: 10px;
+}
+
+.map-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.map-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 10px;
+  background: var(--mapTileBg);
+  border: none;
+  border-radius: 9px;
+  color: var(--text);
+  font-size: 11.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: filter .15s;
+}
+.map-btn:hover {
+  filter: brightness(0.9);
+}
+
+.icon-hidden {
+  display: none;
+}

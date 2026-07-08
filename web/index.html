@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Optimizador de Flotas - Panel</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div class="panel-window">
+
+  <div class="panel-content">
+    
+    <!-- Parámetros -->
+    <div class="card">
+      <div class="card-title">
+        <span class="tick"></span>
+        <span>Parámetros</span>
+      </div>
+      <div class="field-row">
+        <span>Nº vehículos</span>
+        <input class="text-input" value="4">
+      </div>
+      <div class="field-row">
+        <span>Densidad obstáculos</span>
+        <input class="text-input" value="0.0">
+      </div>
+      <div class="slider-container">
+        <div class="field-row">
+          <span>Calidad de ruta</span>
+          <span class="slider-value" id="quality-val">3</span>
+        </div>
+        <div class="slider-track-area" id="quality-slider">
+          <div class="slider-track"></div>
+          <div class="slider-fill" id="quality-fill" style="width: 50%;"></div>
+          <div class="slider-thumb" id="quality-thumb" style="left: 50%;"></div>
+        </div>
+        <div class="slider-labels">
+          <span>rápida</span>
+          <span>máxima</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Vehículos -->
+    <div class="card">
+      <div class="card-title">
+        <span class="tick"></span>
+        <span>Vehículos</span>
+      </div>
+      <div class="segmented-control" id="seg-source">
+        <div class="segmented-thumb" id="thumb-source" style="left: 2px; width: calc(50% - 4px);"></div>
+        <button class="active" data-val="aleatorio">Aleatorio</button>
+        <button data-val="manual">Manual</button>
+      </div>
+      <button class="btn btn-outline">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M3 13h11V7H3z"></path>
+          <path d="M14 10h4l3 3v3h-7z"></path>
+          <circle cx="7" cy="17.5" r="1.6"></circle>
+          <circle cx="17" cy="17.5" r="1.6"></circle>
+        </svg>Insertar vehículos
+      </button>
+    </div>
+
+    <!-- Optimización -->
+    <div class="card">
+      <div class="card-title">
+        <span class="tick"></span>
+        <span>Optimización</span>
+      </div>
+      <div class="segmented-control" id="seg-optim">
+        <div class="segmented-thumb" id="thumb-optim" style="left: calc(200% / 3 + 2px); width: calc(33.333% - 4px);"></div>
+        <button data-val="global">Global</button>
+        <button data-val="prioridades">Grupos</button>
+        <button class="active" data-val="secuencial">Secuencial</button>
+      </div>
+      <div class="field-row" style="opacity:.72">
+        <span style="font-size:12px">Órdenes a explorar</span>
+        <input class="text-input" value="12" style="width:48px; font-size:12px; padding:5px 8px;">
+      </div>
+    </div>
+
+    <!-- Ejecución -->
+    <div class="card">
+      <div class="card-title">
+        <span class="tick"></span>
+        <span>Ejecución</span>
+      </div>
+      <button class="btn btn-primary">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M7 4.5v15l12-7.5z"></path></svg>Simular
+      </button>
+      <button class="btn btn-secondary">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 12a9 9 0 1 1-2.6-6.3"></path><path d="M21 3v5h-5"></path>
+        </svg>Nuevas rutas
+      </button>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-icon" title="Reiniciar">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor">
+            <rect x="5" y="4" width="2.6" height="16" rx="1"></rect><path d="M20 5 9 12l11 7z"></path>
+          </svg>
+        </button>
+        <button class="btn btn-icon" id="btn-play" title="Pausar / reanudar">
+          <svg id="icon-play" width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M7 4.5v15l12-7.5z"></path></svg>
+          <svg id="icon-pause" class="icon-hidden" width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4.5" height="16" rx="1"></rect><rect x="13.5" y="4" width="4.5" height="16" rx="1"></rect></svg>
+        </button>
+        <button class="btn btn-icon" title="Reproducir de nuevo">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 12a9 9 0 1 0 3-6.7"></path><path d="M3 3v4.5h4.5"></path>
+          </svg>
+        </button>
+      </div>
+    </div>
+
+    <!-- Mapa -->
+    <div class="card">
+      <div class="card-title">
+        <span class="tick"></span>
+        <span>Mapa</span>
+      </div>
+      <div class="map-grid">
+        <button class="map-btn">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none">
+            <rect x="3.5" y="3.5" width="17" height="17" rx="4" stroke="var(--accent)" stroke-width="1.8"></rect>
+            <circle cx="8.5" cy="8.5" r="1.5" fill="var(--accent)"></circle>
+            <circle cx="12" cy="12" r="1.5" fill="var(--accent)"></circle>
+            <circle cx="15.5" cy="15.5" r="1.5" fill="var(--accent)"></circle>
+          </svg>Aleatorio
+        </button>
+        <button class="map-btn">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 3v11M8 10l4 4 4-4"></path><path d="M4 20h16"></path>
+          </svg>Importar
+        </button>
+        <button class="map-btn">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M5 4h11l3 3v13H5z"></path><path d="M8 4v6h7"></path>
+          </svg>Guardar
+        </button>
+        <button class="map-btn">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 6h6l2 2h10v11H3z"></path>
+          </svg>Cargar
+        </button>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script src="script.js"></script>
+</body>
+</html>
