@@ -121,7 +121,7 @@ A_LAT_MAX = 1.5
 # de forma lineal a lo largo de REL_SPAN nodos hasta aceptar cualquier
 # orientación. Umbrales absolutos: acotan el tiempo del caso difícil por igual
 # en localhost y en Render, sin depender del techo de memoria.
-REL_INI = 150_000
+REL_INI = 15_000
 REL_SPAN = 200_000
 
 
@@ -265,21 +265,32 @@ def _k_free_sb(x, y, th, Lm, Wm, worldW, worldH,
 
 
 @njit(cache=True)
-def _k_hits_dyn(x, y, th, kk, Ld, Wd, rx, roff, rlen, rlw, R, diag, mdin):
+def _k_hits_dyn(x, y, th, kk, Ld, Wd, rx, roff, rlen, rlw, rrad, R, diag, mdin):
     """¿El OBB (inflado a Ld×Wd) choca con algún vehículo RESERVADO en el paso
     fino kk? Para kk más allá del final de una reserva, esta sigue aparcada."""
     if R == 0:
         return False
-    cA = _k_corners(x, y, th, Ld, Wd)
-    aA = _k_axes(cA)
     vr = 0.5 * diag + mdin
+    cA_ok = False
     for j in range(R):
         lj = rlen[j]
         idx = roff[j] + (kk if kk < lj else lj - 1)
-        ox = rx[idx, 0]; oy = rx[idx, 1]; oth = rx[idx, 2]
-        rl = rlw[j, 0]; rw = rlw[j, 1]
-        if hypot(x - ox, y - oy) > vr + 0.5 * hypot(rl, rw):
+        ox = rx[idx, 0]; oy = rx[idx, 1]
+        r_sum = vr + rrad[j]
+        dx = x - ox
+        if dx > r_sum or dx < -r_sum:
             continue
+        dy = y - oy
+        if dy > r_sum or dy < -r_sum:
+            continue
+        if dx * dx + dy * dy > r_sum * r_sum:
+            continue
+        if not cA_ok:
+            cA = _k_corners(x, y, th, Ld, Wd)
+            aA = _k_axes(cA)
+            cA_ok = True
+        oth = rx[idx, 2]
+        rl = rlw[j, 0]; rw = rlw[j, 1]
         cB = _k_corners(ox, oy, oth, rl, rw)
         aB = _k_axes(cB)
         if _k_sat(cA, aA, cB, aB):
@@ -291,7 +302,7 @@ def _k_hits_dyn(x, y, th, kk, Ld, Wd, rx, roff, rlen, rlw, R, diag, mdin):
 def _k_expand(x0, y0, th0, v0, k, acc, dl, subpasos, h, L, amax,
               vmaxc, vrev, veh_len, veh_wid, margin, mdin, diag,
               worldW, worldH, oc, oax, obb, K, blc, blax, blbb, B,
-              rx, roff, rlen, rlw, R, feas, osub, ov):
+              rx, roff, rlen, rlw, rrad, R, feas, osub, ov):
     """Evalúa TODAS las acciones (accel, delta) de un nodo. Para cada acción integra
     los 'subpasos' del modelo de bicicleta y valida en cada subpaso los obstáculos
     fijos, las metas bloqueadas y las reservas dinámicas. Rellena, por acción a:
@@ -336,7 +347,7 @@ def _k_expand(x0, y0, th0, v0, k, acc, dl, subpasos, h, L, amax,
                 ok = 0
                 break
             if _k_hits_dyn(x, y, th, k + sp + 1, Ld, Wd,
-                           rx, roff, rlen, rlw, R, diag, mdin):
+                           rx, roff, rlen, rlw, rrad, R, diag, mdin):
                 ok = 0
                 break
             osub[a, sp, 0] = x; osub[a, sp, 1] = y; osub[a, sp, 2] = th
@@ -348,7 +359,7 @@ def _k_expand(x0, y0, th0, v0, k, acc, dl, subpasos, h, L, amax,
 def _k_tiro(x, y, th, v, k, gx, gy, gth, con_ang, ang_tol,
             L, dmax, ld, vmaxc, amax, goal_tol, v_tol, h,
             veh_len, veh_wid, margin, mdin, diag, worldW, worldH,
-            oc, oax, obb, K, blc, blax, blbb, B, rx, roff, rlen, rlw, R):
+            oc, oax, obb, K, blc, blax, blbb, B, rx, roff, rlen, rlw, rrad, R):
     """Conexión analítica (pure-pursuit con frenado hasta detenerse en la meta).
     Devuelve (n, poses): n>=0 → éxito con n poses en poses[:n]; n<0 → sin remate.
     Un tope de longitud descarta los rizos que se enroscan sin encarar la meta.
@@ -398,7 +409,7 @@ def _k_tiro(x, y, th, v, k, gx, gy, gth, con_ang, ang_tol,
             return -1, out
         # Punto perseguido: la meta, o la zanahoria sobre el eje de llegada.
         if con_ang == 1:
-            s = 0.62 * d
+            s = 0.85 * d
             smax = 4.0 * L
             if s > smax:
                 s = smax
@@ -444,7 +455,7 @@ def _k_tiro(x, y, th, v, k, gx, gy, gth, con_ang, ang_tol,
                           oc, oax, obb, K, blc, blax, blbb, B, diag, margin):
             return -1, out
         if _k_hits_dyn(x, y, th, kk + 1, Ld, Wd,
-                       rx, roff, rlen, rlw, R, diag, mdin):
+                       rx, roff, rlen, rlw, rrad, R, diag, mdin):
             return -1, out
         out[n, 0] = x; out[n, 1] = y; out[n, 2] = th
         n += 1
@@ -456,11 +467,11 @@ def _k_tiro(x, y, th, v, k, gx, gy, gth, con_ang, ang_tol,
 
 @njit(cache=True)
 def _k_aparca(px, py, pth, k0, kfin, Ld, Wd,
-              rx, roff, rlen, rlw, R, diag, mdin):
+              rx, roff, rlen, rlw, rrad, R, diag, mdin):
     """La plaza final debe quedar libre para siempre: comprueba la pose de
     aparcamiento contra todas las reservas desde k0 hasta que todas paran."""
     for kk in range(k0, kfin + 1):
-        if _k_hits_dyn(px, py, pth, kk, Ld, Wd, rx, roff, rlen, rlw, R, diag, mdin):
+        if _k_hits_dyn(px, py, pth, kk, Ld, Wd, rx, roff, rlen, rlw, rrad, R, diag, mdin):
             return False
     return True
 
@@ -470,7 +481,7 @@ def _k_maniobra(x, y, th, k, gx, gy, gth, ang_tol,
                 L, dmax, ld, vmaxc, amax, goal_tol, v_tol, h,
                 veh_len, veh_wid, margin, mdin, diag, worldW, worldH,
                 oc, oax, obb, K, blc, blax, blbb, B,
-                rx, roff, rlen, rlw, R, res_maxlen):
+                rx, roff, rlen, rlw, rrad, R, res_maxlen):
     """Conector REVERSIBLE para asentar el ÁNGULO DE LLEGADA en sitio apretado.
 
     Cuando la búsqueda se atasca intentando encarar la meta con la orientación
@@ -508,8 +519,6 @@ def _k_maniobra(x, y, th, k, gx, gy, gth, ang_tol,
             kk = k
             vmag = 0.0                       # arranca PARADO: sin salto de velocidad
             for step in range(seg_max):
-                # Acelera desde 0 respetando a_max (hasta el tope de maniobra),
-                # y sin superar el límite de velocidad por curvatura del giro.
                 vmag = min(v_man, vmag + amax * h)
                 kap = abs(tan(frac * dmax)) / L
                 if kap > 1e-9:
@@ -526,7 +535,7 @@ def _k_maniobra(x, y, th, k, gx, gy, gth, ang_tol,
                                   oc, oax, obb, K, blc, blax, blbb, B, diag, margin):
                     break                    # este tramo choca: se abandona
                 if _k_hits_dyn(x1, y1, th1, kk, Ld, Wd,
-                               rx, roff, rlen, rlw, R, diag, mdin):
+                               rx, roff, rlen, rlw, rrad, R, diag, mdin):
                     break
                 seg[step, 0] = x1; seg[step, 1] = y1; seg[step, 2] = th1
                 ncore = step + 1
@@ -552,7 +561,7 @@ def _k_maniobra(x, y, th, k, gx, gy, gth, ang_tol,
                                       oc, oax, obb, K, blc, blax, blbb, B, diag, margin):
                         tail_ok = False; break
                     if _k_hits_dyn(xt, yt, tht, kt, Ld, Wd,
-                                   rx, roff, rlen, rlw, R, diag, mdin):
+                                   rx, roff, rlen, rlw, rrad, R, diag, mdin):
                         tail_ok = False; break
                     seg[ncore + ntail, 0] = xt
                     seg[ncore + ntail, 1] = yt
@@ -566,14 +575,14 @@ def _k_maniobra(x, y, th, k, gx, gy, gth, ang_tol,
                                  L, dmax, ld, vmaxc, amax, goal_tol, v_tol, h,
                                  veh_len, veh_wid, margin, mdin, diag, worldW, worldH,
                                  oc, oax, obb, K, blc, blax, blbb, B,
-                                 rx, roff, rlen, rlw, R)
+                                 rx, roff, rlen, rlw, rrad, R)
                 if nt <= 0:
                     continue
                 kfin = kt + nt
                 kmax = kfin if kfin > res_maxlen else res_maxlen
                 if not _k_aparca(pt[nt - 1, 0], pt[nt - 1, 1], pt[nt - 1, 2],
                                  kfin, kmax, Ld, Wd,
-                                 rx, roff, rlen, rlw, R, diag, mdin):
+                                 rx, roff, rlen, rlw, rrad, R, diag, mdin):
                     continue
                 total = nseg + nt
                 if total < best_total:
@@ -612,6 +621,8 @@ _EMPTY_BB = np.empty((0, 3))
 _EMPTY_XY = np.empty((0, 3))
 _EMPTY_OFF = np.empty(0, np.int64)
 _EMPTY_LW = np.empty((0, 2))
+_EMPTY_RAD = np.empty(0)
+
 
 
 def _pack_polys(polys):
@@ -1017,13 +1028,14 @@ class Planificador:
         # lateral (A_LAT_MAX), así que subirlo no empeora los giros; solo hace
         # las rutas algo menos óptimas (un poco más largas), cosa asumible.
         tabla = {
-            1: (17, 12, 1.7,  800000),
-            2: (23, 11, 1.5, 1100000),
-            3: (31, 10, 1.35, 1600000),
-            4: (41,  8, 1.2, 2400000),
-            5: (55,  6, 1.08, 3600000),
+            # nivel: (n_dir, ang_res, peso_h, max_nodos, rel_ini, rel_span, ang_tol_max)
+            1: (17, 12, 1.70,  800000,  8000,  40000, 0.28),
+            2: (23, 11, 1.50, 1100000, 12000,  80000, 0.23),
+            3: (31, 10, 1.35, 1600000, 15000, 120000, 0.18),
+            4: (41,  8, 1.20, 2400000, 25000, 200000, 0.14),
+            5: (55,  6, 1.08, 3600000, 40000, 350000, 0.11),
         }
-        n_dir, ang, peso, mx = tabla.get(int(nivel), tabla[3])
+        n_dir, ang, peso, mx, r_ini, r_span, a_max = tabla.get(int(nivel), tabla[3])
         half = n_dir // 2
         fracs = [0.0]
         for i in range(1, half + 1):
@@ -1033,11 +1045,17 @@ class Planificador:
         self.res_ang = math.radians(ang)
         self.peso_h = peso
         self.max_exp = mx
+        self.rel_ini = r_ini
+        self.rel_span = r_span
+        self.ang_tol_max = a_max
+
 
     def _clave(self, x, y, th, v, k):
-        return (int(x / self.res_pos), int(y / self.res_pos),
-                int((th % (2 * math.pi)) / self.res_ang),
-                int(round(v / self.res_v)), k)
+        ix = int(x / self.res_pos)
+        iy = int(y / self.res_pos)
+        ith = int((th % (2 * math.pi)) / self.res_ang)
+        iv = int(round(v / self.res_v)) & 0xFF
+        return (ix << 36) | (iy << 28) | (ith << 20) | (iv << 14) | k
 
     # ------------------- empaquetado para los kernels -------------------- #
     def _pack_bloqueos(self):
@@ -1062,17 +1080,18 @@ class Planificador:
         items = reservas.items
         R = len(items)
         if R == 0:
-            return _EMPTY_XY, _EMPTY_OFF, _EMPTY_OFF, _EMPTY_LW, 0
+            return _EMPTY_XY, _EMPTY_OFF, _EMPTY_OFF, _EMPTY_LW, _EMPTY_RAD, 0
         T = sum(len(t) for t, _, _ in items)
         rx = np.empty((T, 3)); off = np.empty(R, np.int64)
-        rlen = np.empty(R, np.int64); rlw = np.empty((R, 2))
+        rlen = np.empty(R, np.int64); rlw = np.empty((R, 2)); rrad = np.empty(R)
         p = 0
         for j, (traj, l, w) in enumerate(items):
             off[j] = p; rlen[j] = len(traj); rlw[j, 0] = l; rlw[j, 1] = w
+            rrad[j] = 0.5 * math.hypot(l, w)
             for pose in traj:
                 rx[p, 0] = pose[0]; rx[p, 1] = pose[1]; rx[p, 2] = pose[2]
                 p += 1
-        return rx, off, rlen, rlw, R
+        return rx, off, rlen, rlw, rrad, R
 
     # ------------------- heurístico con obstáculos ----------------------- #
     def _asegurar_ocupacion(self):
@@ -1221,7 +1240,7 @@ class Planificador:
         K = oc.shape[0]
         blc, blax, blbb = self._pack_bloqueos()
         B = blc.shape[0]
-        rx, roff, rlen, rlw, R = self._pack_reservas(reservas)
+        rx, roff, rlen, rlw, rrad, R = self._pack_reservas(reservas)
 
         ns = self.subpasos
         h = self.dt / ns
@@ -1256,10 +1275,10 @@ class Planificador:
         while abierto and expand < self.max_exp and nid < self.max_nodos:
             _f, cid, x, y, th, v, k, g = heapq.heappop(abierto)
             expand += 1
-            self.expandidos = expand        # diagnóstico: nodos expandidos
-            self.nodos = nid                 # diagnóstico: nodos creados
 
             if (expand & 255) == 0:
+                self.expandidos = expand
+                self.nodos = nid
                 now = time.perf_counter()
                 if self.deadline is not None and now > self.deadline:
                     self.motivo = "limite"
@@ -1287,13 +1306,17 @@ class Planificador:
                 # de buscar el ángulo exacto indefinidamente. Umbral ABSOLUTO (no
                 # ligado al techo de memoria), para que el tiempo sea el mismo en
                 # localhost y en Render.
-                fr = (nid - REL_INI) / REL_SPAN
+                fr = (nid - self.rel_ini) / self.rel_span
                 if fr < 0.0:
                     fr = 0.0
                 elif fr > 1.0:
                     fr = 1.0
-                ang_tol_din = ang_tol + (math.pi - ang_tol) * fr
-                con_ang_din = 1 if ang_tol_din < 1.396 else 0   # 1.396 rad ≈ 80°
+                # Máximo de relajación acotado por nivel (self.ang_tol_max) para que
+                # si no encuentra solución con tolerancia fina, sea algo más
+                # permisivo pero NUNCA llegue a desviarse mucho de la orientación ideal.
+                max_tol = max(ang_tol, self.ang_tol_max)
+                ang_tol_din = ang_tol + (max_tol - ang_tol) * fr
+                con_ang_din = 1
             else:
                 ang_tol_din = ang_tol
                 con_ang_din = 0
@@ -1319,7 +1342,7 @@ class Planificador:
                                        self.v_tol, h, self._len, self._wid,
                                        self.margen, self.margen_din, self.diag,
                                        W, H, oc, oax, obb, K, blc, blax, blbb, B,
-                                       rx, roff, rlen, rlw, R)
+                                       rx, roff, rlen, rlw, rrad, R)
                     if n > 0:
                         tiro = [(poses[i, 0], poses[i, 1], poses[i, 2]) for i in range(n)]
                         kfin_t = k + n
@@ -1328,7 +1351,7 @@ class Planificador:
                         fx, fy, fth = tiro[-1]
                         kmax = kfin_t if kfin_t > res_maxlen else res_maxlen
                         if _k_aparca(fx, fy, fth, kfin_t, kmax, Ld, Wd,
-                                     rx, roff, rlen, rlw, R, self.diag, self.margen_din):
+                                     rx, roff, rlen, rlw, rrad, R, self.diag, self.margen_din):
                             base = self._reconstruir(padre_id, arista_id, cid,
                                                      (sx, sy, sth))
                             self.motivo = "ok"
@@ -1347,7 +1370,7 @@ class Planificador:
                     Wd = self._wid + 2.0 * self.margen_din
                     kfin = k if k > res_maxlen else res_maxlen
                     if _k_aparca(x, y, th, k, kfin, Ld, Wd,
-                                 rx, roff, rlen, rlw, R, self.diag, self.margen_din):
+                                 rx, roff, rlen, rlw, rrad, R, self.diag, self.margen_din):
                         self.motivo = "ok"
                         self.relajado = con_ang == 1 and ang_tol_din > ang_tol * 1.01
                         return self._reconstruir(padre_id, arista_id, cid, (sx, sy, sth))
@@ -1370,7 +1393,7 @@ class Planificador:
                                      self.goal_tol_fin, self.v_tol, h,
                                      self._len, self._wid, self.margen, self.margen_din,
                                      self.diag, W, H, oc, oax, obb, K,
-                                     blc, blax, blbb, B, rx, roff, rlen, rlw, R,
+                                     blc, blax, blbb, B, rx, roff, rlen, rlw, rrad, R,
                                      res_maxlen)
                 if nm > 0:
                     maniobra = [(pm[i, 0], pm[i, 1], pm[i, 2]) for i in range(nm)]
@@ -1388,7 +1411,7 @@ class Planificador:
                       self.v_max_c, self.v_rev, self._len, self._wid,
                       self.margen, self.margen_din, self.diag, W, H,
                       oc, oax, obb, K, blc, blax, blbb, B,
-                      rx, roff, rlen, rlw, R, feas, osub, ov)
+                      rx, roff, rlen, rlw, rrad, R, feas, osub, ov)
 
             for ai in range(A):
                 if not feas[ai]:
@@ -1423,7 +1446,8 @@ class Planificador:
                 # frenar de verdad cuando hace falta.
                 ng += 0.40 * self.dt * abs(acc[ai] - aprev) / self.a_max
                 key = self._clave(nx, ny, nth, nv, nk)
-                if ng < mejor_g.get(key, float("inf")):
+                prev_g = mejor_g.get(key)
+                if prev_g is None or ng < prev_g:
                     mejor_g[key] = ng
                     nid += 1
                     padre_id[nid] = cid
@@ -1431,6 +1455,14 @@ class Planificador:
                     delta_prev[nid] = delta
                     acc_prev[nid] = acc[ai]
                     hh = self._h_time(nx, ny)
+                    if con_ang:
+                        dx_g = gx - nx; dy_g = gy - ny
+                        d_g = math.hypot(dx_g, dy_g)
+                        if d_g > 0.1:
+                            ang_to_g = math.atan2(dy_g, dx_g)
+                            err_app = abs(ang_norm(gth - ang_to_g))
+                            err_th = abs(ang_norm(nth - gth))
+                            hh += (0.35 * err_app + 0.25 * err_th) * (self._len / self.v_max_c)
                     heapq.heappush(abierto,
                                    (ng + self.peso_h * hh, nid, nx, ny, nth, nv, nk, ng))
 
@@ -1467,20 +1499,21 @@ def warmup():
     eb, ebb = _EMPTY_C, _EMPTY_BB
     rx = np.array([[5.0, 5.0, 0.0]]); roff = np.array([0], np.int64)
     rlen = np.array([1], np.int64); rlw = np.array([[1.3, 0.7]])
+    rrad = np.array([1.5])
     acc = np.array([1.0, 0.0]); dl = np.array([0.1, -0.1])
     feas = np.empty(2, np.int8); osub = np.empty((2, 4, 3)); ov = np.empty(2)
     _k_expand(2.0, 2.0, 0.0, 0.0, 0, acc, dl, 4, 0.1, 0.7, 1.0,
               2.5, 1.25, 1.3, 0.7, 0.1, 0.15, 1.48, W, H,
-              oc, oax, obb, 1, eb, eb, ebb, 0, rx, roff, rlen, rlw, 1, feas, osub, ov)
+              oc, oax, obb, 1, eb, eb, ebb, 0, rx, roff, rlen, rlw, rrad, 1, feas, osub, ov)
     _k_tiro(2.0, 2.0, 0.0, 0.0, 0, 6.0, 6.0, 0.0, 1, 0.2,
             0.7, 0.6, 2.0, 2.5, 1.0, 1.6, 0.45, 0.1,
             1.3, 0.7, 0.1, 0.15, 1.48, W, H, oc, oax, obb, 1,
-            eb, eb, ebb, 0, rx, roff, rlen, rlw, 1)
-    _k_aparca(2.0, 2.0, 0.0, 0, 1, 1.6, 1.0, rx, roff, rlen, rlw, 1, 1.48, 0.15)
+            eb, eb, ebb, 0, rx, roff, rlen, rlw, rrad, 1)
+    _k_aparca(2.0, 2.0, 0.0, 0, 1, 1.6, 1.0, rx, roff, rlen, rlw, rrad, 1, 1.48, 0.15)
     _k_maniobra(2.0, 2.0, 0.0, 0, 6.0, 6.0, 0.0, 0.2,
                 0.7, 0.6, 2.0, 2.5, 1.0, 0.2, 0.45, 0.1,
                 1.3, 0.7, 0.1, 0.15, 1.48, W, H, oc, oax, obb, 1,
-                eb, eb, ebb, 0, rx, roff, rlen, rlw, 1, 1)
+                eb, eb, ebb, 0, rx, roff, rlen, rlw, rrad, 1, 1)
     _k_occ(4, 4, 0.5, 0.45, W, H, oc, oax, obb, 1)
 
 
