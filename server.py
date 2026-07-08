@@ -312,13 +312,13 @@ def _reubicar(env, veh, vehiculos):
     veh.meta_th = thm
     return True
 
-#  Presupuesto de tiempo POR VEHÍCULO (segundos). El núcleo de búsqueda no
-#  vectoriza el chequeo de colisión/cinemática, así que su ritmo real es de
-#  unos pocos miles de expansiones por segundo (no cientos de miles); con un
-#  plazo compartido entre varios vehículos, los primeros de la cola podían
-#  agotarlo entero y dejar a los últimos sin tiempo para buscar siquiera un
-#  primer nodo válido, aunque su ruta fuera perfectamente posible.
-PRESUPUESTO_VEHICULO_S = 20.0
+#  Techo de NODOS POR VEHÍCULO. En vez de un plazo de tiempo (que corta la
+#  búsqueda aunque la ruta exista y deja vehículos aparcados sin motivo), cada
+#  vehículo busca hasta ENCONTRAR ruta o hasta crear este número de nodos, sin
+#  límite de tiempo. Es un tope "absurdamente alto": solo se alcanza en casos
+#  realmente imposibles, no en rutas normales. Al ser nodos CREADOS, también
+#  acota la memoria (evita que un caso imposible tumbe el servidor).
+CAP_NODOS = 300_000
 
 def _ruta_real(veh, traj):
     """¿'traj' es una ruta que de verdad LLEVA el vehículo a su meta, y no un
@@ -338,97 +338,44 @@ def _ruta_real(veh, traj):
 
 
 def _ejecutar_planificacion(env, vehiculos, indices, base, calidad, modo_opt, max_cand, reubicable=False, inicios=None):
-    import time
-    n = len(indices)
-    ordenes = mve.generar_ordenes(vehiculos, indices, modo_opt, max_cand)
+    """Planificación SECUENCIAL cooperativa, simple y robusta.
+
+    Un ÚNICO orden de prioridad (grupo, prioridad). Se planifica vehículo a
+    vehículo y cada uno se RESERVA como obstáculo (móvil si logra ruta, estático
+    si no) antes de pasar al siguiente: hasta que un vehículo no resuelve su
+    trayecto, no deja pasar al que va detrás. Cada búsqueda corre sin límite de
+    tiempo hasta encontrar ruta o agotar CAP_NODOS expansiones. No hay
+    "rescates" (ni reubicación, ni relajar el ángulo de llegada): así el
+    comportamiento es predecible y todo vehículo con ruta posible la encuentra."""
     pl = mve.Planificador(env)
     pl.configurar_calidad(calidad)
-    cap_prev = pl.max_exp
 
-    mejor = None
-    for oi, orden in enumerate(ordenes):
-        pl.max_exp = cap_prev
-        trays, motivos, coste = mve.planificar_orden(
-            pl, vehiculos, orden, base, inicios=inicios,
-            deadline_dur=PRESUPUESTO_VEHICULO_S
-        )
-        # Un vehículo con ruta estática (no se mueve pese a no estar en su meta)
-        # cuenta como FALLO: así no se acepta un orden que deja coches congelados
-        # y esos vehículos pasan por el rescate en vez de mostrarse inmóviles.
-        for i in orden:
-            if trays[i] is not None and not _ruta_real(vehiculos[i], trays[i]):
-                trays[i] = None
-        fallos = sum(1 for i in orden if trays[i] is None)
-        if mejor is None or (fallos, coste) < (mejor[0], mejor[1]):
-            mejor = (fallos, coste, trays, motivos, orden)
-        if fallos == 0:
-            break
+    # Un solo orden: el primer candidato del modo elegido (para "secuencial" es
+    # el orden de prioridad; para los demás, un orden inicial razonable).
+    orden = mve.generar_ordenes(vehiculos, indices, modo_opt, max_cand)[0]
 
-    fallos, _, trays, motivos, orden = mejor
+    reservas = base.copia()
+    trays = {}
+    motivos = {}
+    for i in orden:
+        veh = vehiculos[i]
+        pl.max_nodos = CAP_NODOS                  # límite por nodos creados (memoria)
+        pl.max_exp = 5_000_000                    # las expansiones no son el freno
+        pl.deadline = None                        # sin límite de tiempo: solo nodos
+        pl.bloqueos = mve.bloqueos_metas(vehiculos, orden, excepto=i)
+        ini = inicios.get(i) if inicios else None
+        traj = pl.planificar(veh, reservas, inicio=ini)
+        motivos[i] = pl.motivo
+        if _ruta_real(veh, traj):
+            trays[i] = traj
+            reservas.add(traj, veh.length, veh.width)
+        else:
+            # No llegó: queda APARCADO en su salida y sigue contando como
+            # obstáculo (reserva estática) para los vehículos que van detrás.
+            trays[i] = None
+            px, py, pth = ini if ini is not None else veh.inicio
+            reservas.add([(px, py, pth)], veh.length, veh.width)
 
-    if fallos > 0:
-        reservas = base.copia()
-        for i in orden:
-            if trays[i] is not None:
-                v = vehiculos[i]
-                reservas.add(trays[i], v.length, v.width)
-        for i in orden:
-            if trays[i] is not None:
-                continue
-            veh = vehiculos[i]
-            pl.max_exp = max(cap_prev, 3000000)
-            pl.deadline = time.perf_counter() + PRESUPUESTO_VEHICULO_S
-            pl.bloqueos = mve.bloqueos_metas(vehiculos, orden, excepto=i)
-            ini = inicios.get(i) if inicios else None
-            traj = pl.planificar(veh, reservas, inicio=ini)
-            motivos[i] = pl.motivo
-
-            # "sin_ruta" == el punto de partida/plaza está realmente atrapado
-            # (típicamente porque cae sobre la meta bloqueada de otro
-            # vehículo): reubicar sirve. "limite" == la búsqueda se queda sin
-            # tiempo/nodos, algo mucho más probable cuando el ÁNGULO DE
-            # LLEGADA exigido obliga a una maniobra de varios tramos que el
-            # conector reversible no cubre en un solo intento; ahí reubicar
-            # una y otra vez (cada intento con su propio presupuesto) solo
-            # desperdicia tiempo, porque el problema no es la posición.
-            # Presupuesto reducido para los reintentos de reubicación: si la
-            # nueva posición vuelve a estar atrapada, conviene averiguarlo
-            # rápido y probar otra, en vez de agotar el presupuesto completo
-            # en cada intento (antes: hasta 6 × 20 s = 2 min solo en esto).
-            intentos = 0
-            while (pl.motivo == "sin_ruta" and reubicable and inicios is None and intentos < 3):
-                if not _reubicar(env, veh, vehiculos):
-                    break
-                pl.deadline = time.perf_counter() + 8.0
-                pl.bloqueos = mve.bloqueos_metas(vehiculos, orden, excepto=i)
-                traj = pl.planificar(veh, reservas)
-                motivos[i] = pl.motivo
-                intentos += 1
-
-            if (traj is None or len(traj) < 2) and veh.meta_th is not None:
-                # Último recurso: antes de dejar el vehículo sin ruta
-                # ("aparcado"), se reintenta UNA vez con el ángulo de llegada
-                # libre. Es preferible llegar sin la orientación exacta que
-                # no llegar, y evita agotar el presupuesto reubicando cuando
-                # el problema real es el ángulo, no la posición.
-                veh.meta_th = None
-                pl.deadline = time.perf_counter() + PRESUPUESTO_VEHICULO_S
-                pl.bloqueos = mve.bloqueos_metas(vehiculos, orden, excepto=i)
-                traj = pl.planificar(veh, reservas, inicio=ini)
-                motivos[i] = pl.motivo
-
-            if _ruta_real(veh, traj):
-                trays[i] = traj
-                motivos[i] = "ok"
-                reservas.add(traj, veh.length, veh.width)
-            elif traj:
-                # No consiguió avanzar: se deja aparcado como obstáculo estático,
-                # pero NO se marca "ok" (no ha hecho su ruta).
-                trays[i] = [traj[0], traj[0]]
-                reservas.add(trays[i], veh.length, veh.width)
-
-    pl.deadline = None
-    pl.max_exp = cap_prev
     return trays, motivos
 
 @app.route("/api/simular", methods=["POST"])

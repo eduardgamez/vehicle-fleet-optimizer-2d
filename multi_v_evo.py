@@ -100,6 +100,21 @@ from numba import njit
 STEER_SPEED_C = 0.35
 
 
+# Aceleración lateral (centrípeta) máxima admisible en curva, en m/s². Impone
+# un límite de velocidad EN FUNCIÓN DE LA CURVATURA del giro: v_max_curva =
+# sqrt(A_LAT_MAX / |κ|), con κ = tan(δ)/L la curvatura del arco. Esto hace que
+# el vehículo:
+#   · reduzca la velocidad al ENTRAR en una curva (y de forma gradual, acotada
+#     por su a_max, sin frenazos bruscos),
+#   · MANTENGA la velocidad reducida MIENTRAS dura la curva (no solo al principio),
+#   · y vuelva a acelerar SOLO cuando el giro se abre (κ → 0), no antes.
+# Es el mismo criterio físico que usa un conductor: en las rectas, rápido; en
+# los giros cerrados, despacio y sostenido. Sustituye al comportamiento anterior
+# —velocidad ligada solo al tiempo/colisión— que producía frenar-y-acelerar en
+# mitad del giro.
+A_LAT_MAX = 1.5
+
+
 # --------------------------------------------------------------------------- #
 # Mundo (en metros) y dibujo
 # --------------------------------------------------------------------------- #
@@ -263,7 +278,7 @@ def _k_hits_dyn(x, y, th, kk, Ld, Wd, rx, roff, rlen, rlw, R, diag, mdin):
 
 
 @njit(cache=True)
-def _k_expand(x0, y0, th0, v0, k, acc, dl, subpasos, h, L,
+def _k_expand(x0, y0, th0, v0, k, acc, dl, subpasos, h, L, amax,
               vmaxc, vrev, veh_len, veh_wid, margin, mdin, diag,
               worldW, worldH, oc, oax, obb, K, blc, blax, blbb, B,
               rx, roff, rlen, rlw, R, feas, osub, ov):
@@ -284,7 +299,23 @@ def _k_expand(x0, y0, th0, v0, k, acc, dl, subpasos, h, L,
         ok = 1
         ac = acc[a]; dl_a = dl[a]
         for sp in range(subpasos):
+            v_ant = v
             v = min(vmaxc, max(-vrev, v + ac * h))
+            # Límite de velocidad por aceleración lateral en curva: en un giro de
+            # curvatura κ = tan(δ)/L la rapidez no puede superar sqrt(A_LAT/κ).
+            # El descenso se acota a amax·h por subpaso para que la entrada en la
+            # curva sea una frenada suave (no un frenazo), y el límite se
+            # mantiene mientras dure el giro.
+            kap = abs(tan(dl_a)) / L
+            if kap > 1e-9:
+                v_turn = sqrt(A_LAT_MAX / kap)
+                if v > v_turn:
+                    v = v_turn
+                if -v > v_turn:
+                    v = -v_turn
+            piso = v_ant - amax * h
+            if v < piso:
+                v = piso
             av = v if v >= 0.0 else -v
             dtn = tan(dl_a * (1.0 - STEER_SPEED_C * (av / vmaxc)))
             th = th + (1.0 / L) * dtn * (v * h)
@@ -356,6 +387,7 @@ def _k_tiro(x, y, th, v, k, gx, gy, gth, con_ang, ang_tol,
             tx = gx - s * cos(gth); ty = gy - s * sin(gth)
         else:
             tx = gx; ty = gy
+        v_ant = v
         dd = d if d > 0.0 else 0.0
         v_des = min(vmaxc, sqrt(2.0 * amax * dd))
         dv = max(-amax * h, min(amax * h, v_des - v))
@@ -372,6 +404,16 @@ def _k_tiro(x, y, th, v, k, gx, gy, gth, con_ang, ang_tol,
         # Tope de dirección reducido con la rapidez (giro–velocidad).
         dmax_v = dmax * (1.0 - STEER_SPEED_C * (v / vmaxc))
         delta = max(-dmax_v, min(dmax_v, atan2(2.0 * L * sin(alpha), den)))
+        # Límite por aceleración lateral: en el giro final la velocidad se reduce
+        # según la curvatura y se mantiene baja durante todo el arco (frenada
+        # suave, acotada por amax; nada de acelerar en mitad de la curva).
+        kap = abs(tan(delta)) / L
+        if kap > 1e-9:
+            v_turn = sqrt(A_LAT_MAX / kap)
+            if v > v_turn:
+                v = v_turn
+                if v < v_ant - amax * h:
+                    v = v_ant - amax * h
         th = th + (1.0 / L) * tan(delta) * (v * h)
         x = x + cos(th) * v * h
         y = y + sin(th) * v * h
@@ -446,8 +488,14 @@ def _k_maniobra(x, y, th, k, gx, gy, gth, ang_tol,
             kk = k
             vmag = 0.0                       # arranca PARADO: sin salto de velocidad
             for step in range(seg_max):
-                # Acelera desde 0 respetando a_max (hasta el tope de maniobra).
+                # Acelera desde 0 respetando a_max (hasta el tope de maniobra),
+                # y sin superar el límite de velocidad por curvatura del giro.
                 vmag = min(v_man, vmag + amax * h)
+                kap = abs(tan(frac * dmax)) / L
+                if kap > 1e-9:
+                    v_turn = sqrt(A_LAT_MAX / kap)
+                    if vmag > v_turn:
+                        vmag = v_turn
                 vv = dirf * vmag
                 fdel = tan(frac * dmax * (1.0 - STEER_SPEED_C * (vmag / vmaxc)))
                 th1 = th1 + (1.0 / L) * fdel * (vv * h)
@@ -896,6 +944,12 @@ class Planificador:
         self.v_rev = 2.5
         self.res_ang = math.radians(10)
         self.max_exp = 600000
+        # Techo de NODOS CREADOS (no solo expandidos). Acota la memoria del
+        # grafo de reconstrucción: cada nodo guarda un tramo (4 poses), así que
+        # este límite es lo que evita que un vehículo irresoluble haga crecer la
+        # memoria sin freno (y tumbe el servidor). Es el "número absurdamente
+        # alto de nodos" a partir del cual se da por imposible.
+        self.max_nodos = 3_000_000
         self.peso_h = 1.6
         self.dir_fracs = []
         self.configurar_calidad(3)
@@ -930,12 +984,20 @@ class Planificador:
         con obstáculos y reservas, peso≈1.5 (nivel 3) no pierde robustez; por
         debajo de ~1.2 los casos difíciles se disparan en tiempo, reservado a la
         calidad alta."""
+        # El PESO del heurístico se sube respecto a versiones anteriores para que
+        # la búsqueda encuentre ruta en MUCHOS menos nodos (más rápida y con
+        # menos memoria: clave para no agotar el tiempo/memoria del servidor y
+        # para que, con el techo alto de nodos, todo vehículo resoluble llegue
+        # sin dejar coches «aparcados»). La suavidad y la reducción de velocidad
+        # en curva ya NO dependen del peso, sino del límite de aceleración
+        # lateral (A_LAT_MAX), así que subirlo no empeora los giros; solo hace
+        # las rutas algo menos óptimas (un poco más largas), cosa asumible.
         tabla = {
-            1: (17, 12, 1.5,  800000),
-            2: (23, 11, 1.35, 1100000),
-            3: (31, 10, 1.25, 1600000),
-            4: (41,  8, 1.15, 2400000),
-            5: (55,  6, 1.05, 3600000),
+            1: (17, 12, 2.6,  800000),
+            2: (23, 11, 2.3, 1100000),
+            3: (31, 10, 2.0, 1600000),
+            4: (41,  8, 1.6, 2400000),
+            5: (55,  6, 1.3, 3600000),
         }
         n_dir, ang, peso, mx = tabla.get(int(nivel), tabla[3])
         half = n_dir // 2
@@ -1166,7 +1228,7 @@ class Planificador:
         self._last_tick = time.perf_counter()
         self.motivo = "limite"
 
-        while abierto and expand < self.max_exp:
+        while abierto and expand < self.max_exp and nid < self.max_nodos:
             _f, cid, x, y, th, v, k, g = heapq.heappop(abierto)
             expand += 1
 
@@ -1258,7 +1320,7 @@ class Planificador:
 
             dprev = delta_prev.get(cid, 0.0)
             aprev = acc_prev.get(cid, 0.0)
-            _k_expand(x, y, th, v, k, acc, dl, ns, h, L,
+            _k_expand(x, y, th, v, k, acc, dl, ns, h, L, self.a_max,
                       self.v_max_c, self.v_rev, self._len, self._wid,
                       self.margen, self.margen_din, self.diag, W, H,
                       oc, oax, obb, K, blc, blax, blbb, B,
@@ -1331,7 +1393,7 @@ def warmup():
     rlen = np.array([1], np.int64); rlw = np.array([[1.3, 0.7]])
     acc = np.array([1.0, 0.0]); dl = np.array([0.1, -0.1])
     feas = np.empty(2, np.int8); osub = np.empty((2, 4, 3)); ov = np.empty(2)
-    _k_expand(2.0, 2.0, 0.0, 0.0, 0, acc, dl, 4, 0.1, 0.7,
+    _k_expand(2.0, 2.0, 0.0, 0.0, 0, acc, dl, 4, 0.1, 0.7, 1.0,
               2.5, 1.25, 1.3, 0.7, 0.1, 0.15, 1.48, W, H,
               oc, oax, obb, 1, eb, eb, ebb, 0, rx, roff, rlen, rlw, 1, feas, osub, ov)
     _k_tiro(2.0, 2.0, 0.0, 0.0, 0, 6.0, 6.0, 0.0, 1, 0.2,
