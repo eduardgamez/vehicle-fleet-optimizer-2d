@@ -338,7 +338,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const initApp = async () => {
     try {
       const res = await fetch('/api/init');
-      const data = await res.json();
+      const data = await leerRespuesta(res);
       if (data.ok) {
         state.obstaculos = data.obstaculos || [];
         state.vehiculos = data.vehiculos || [];
@@ -355,6 +355,21 @@ document.addEventListener('DOMContentLoaded', () => {
   };
 
   // --- Conexión con Endpoints API (/api/generar) ---
+  // Lee la respuesta sin asumir que es JSON: si el servidor devuelve una
+  // página HTML de error (502/504 del proxy de Render, o un 500), muestra el
+  // motivo real en vez de "The string did not match the expected pattern".
+  const leerRespuesta = async (res) => {
+    const texto = await res.text();
+    try {
+      return JSON.parse(texto);
+    } catch (_) {
+      const motivo = res.status === 502 || res.status === 503 || res.status === 504
+        ? `El servidor no respondió (código ${res.status}). Puede que la simulación consumiera demasiada memoria o tardara demasiado. Prueba con menos vehículos o menor calidad.`
+        : `El servidor devolvió una respuesta inesperada (código ${res.status}).`;
+      return { ok: false, error: motivo };
+    }
+  };
+
   const generarVehiculos = async () => {
     statusText.textContent = "Generando vehículos en servidor...";
     try {
@@ -367,7 +382,7 @@ document.addEventListener('DOMContentLoaded', () => {
           texto: vehiculosInput?.value || ""
         })
       });
-      const data = await res.json();
+      const data = await leerRespuesta(res);
       if (!data.ok) {
         statusText.textContent = `Error: ${data.error}`;
         return;
@@ -410,7 +425,7 @@ document.addEventListener('DOMContentLoaded', () => {
           densidad: parseFloat(densidadInput?.value || 0.0)
         })
       });
-      const data = await res.json();
+      const data = await leerRespuesta(res);
       if (data.ok) {
         state.obstaculos = data.obstaculos || [];
         state.vehiculos = [];
@@ -439,7 +454,7 @@ document.addEventListener('DOMContentLoaded', () => {
         method: 'POST',
         body: formData
       });
-      const data = await res.json();
+      const data = await leerRespuesta(res);
       if (data.ok) {
         state.obstaculos = data.obstaculos || [];
         state.vehiculos = [];
@@ -459,7 +474,7 @@ document.addEventListener('DOMContentLoaded', () => {
   btnMapaGuardar?.addEventListener('click', async () => {
     try {
       const res = await fetch('/api/mapa/guardar');
-      const data = await res.json();
+      const data = await leerRespuesta(res);
       const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -487,7 +502,7 @@ document.addEventListener('DOMContentLoaded', () => {
         method: 'POST',
         body: formData
       });
-      const data = await res.json();
+      const data = await leerRespuesta(res);
       if (data.ok) {
         state.obstaculos = data.obstaculos || [];
         state.vehiculos = [];
@@ -503,21 +518,6 @@ document.addEventListener('DOMContentLoaded', () => {
       statusText.textContent = `Error: ${err.message}`;
     }
   });
-
-  // Lee la respuesta sin asumir que es JSON: si el servidor devuelve una
-  // página HTML de error (502/504 del proxy de Render, o un 500), muestra el
-  // motivo real en vez de "The string did not match the expected pattern".
-  const leerRespuesta = async (res) => {
-    const texto = await res.text();
-    try {
-      return JSON.parse(texto);
-    } catch (_) {
-      const motivo = res.status === 502 || res.status === 503 || res.status === 504
-        ? `El servidor no respondió (código ${res.status}). Puede que la simulación consumiera demasiada memoria o tardara demasiado. Prueba con menos vehículos o menor calidad.`
-        : `El servidor devolvió una respuesta inesperada (código ${res.status}).`;
-      return { ok: false, error: motivo };
-    }
-  };
 
   // --- Conexión con Endpoints API (/api/simular) ---
   const simularFlota = async () => {
@@ -571,7 +571,7 @@ document.addEventListener('DOMContentLoaded', () => {
           max_cand: parseInt(maxCandInput?.value || 12)
         })
       });
-      const data = await res.json();
+      const data = await leerRespuesta(res);
       if (!data.ok) {
         statusText.textContent = `Error: ${data.error}`;
         return;
