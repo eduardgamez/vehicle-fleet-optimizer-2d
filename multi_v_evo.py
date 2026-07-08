@@ -1157,6 +1157,7 @@ class Planificador:
         padre_id = {}
         arista_id = {}
         delta_prev = {0: 0.0}
+        acc_prev = {0: 0.0}
         h0 = self._h_time(sx, sy)
         abierto = [(self.peso_h * h0, 0, sx, sy, sth, 0.0, 0, 0.0)]
         mejor_g = {clave0: 0.0}
@@ -1256,6 +1257,7 @@ class Planificador:
                 continue
 
             dprev = delta_prev.get(cid, 0.0)
+            aprev = acc_prev.get(cid, 0.0)
             _k_expand(x, y, th, v, k, acc, dl, ns, h, L,
                       self.v_max_c, self.v_rev, self._len, self._wid,
                       self.margen, self.margen_din, self.diag, W, H,
@@ -1279,7 +1281,16 @@ class Planificador:
                 if abs(nv) < 1e-3 and acc[ai] <= 0.0:
                     ng += 0.20 * self.dt              # pararse sin motivo cuesta tiempo
                 ng += 0.10 * self.dt * abs(delta) / dmax          # ε: prefiere ir recto
-                ng += 0.08 * self.dt * abs(delta - dprev)         # ε: sin temblor
+                ng += 0.08 * self.dt * abs(delta - dprev)         # ε: sin temblor de volante
+                # ε: sin temblor de acelerador. Sin este término, alternar
+                # acelerar/frenar sale gratis (el coste es solo tiempo) y el
+                # planificador encadena frenadas y arranques sin sentido al
+                # girar —bastaba con reducir un poco la velocidad—. Penalizar el
+                # CAMBIO de aceleración (jerk) hace más barato mantener una
+                # velocidad estable a lo largo de la curva. |Δacc|/a_max ∈ {0,1,2};
+                # una inversión +a→−a cuesta 0.30·dt, disuade el vaivén pero no
+                # impide frenar de verdad cuando hace falta.
+                ng += 0.15 * self.dt * abs(acc[ai] - aprev) / self.a_max
                 key = self._clave(nx, ny, nth, nv, nk)
                 if ng < mejor_g.get(key, float("inf")):
                     mejor_g[key] = ng
@@ -1287,6 +1298,7 @@ class Planificador:
                     padre_id[nid] = cid
                     arista_id[nid] = osub[ai].copy()
                     delta_prev[nid] = delta
+                    acc_prev[nid] = acc[ai]
                     hh = self._h_time(nx, ny)
                     heapq.heappush(abierto,
                                    (ng + self.peso_h * hh, nid, nx, ny, nth, nv, nk, ng))

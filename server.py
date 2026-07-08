@@ -306,6 +306,22 @@ def _reubicar(env, veh, vehiculos):
 #  primer nodo válido, aunque su ruta fuera perfectamente posible.
 PRESUPUESTO_VEHICULO_S = 20.0
 
+def _ruta_real(veh, traj):
+    """¿'traj' es una ruta que de verdad LLEVA el vehículo a su meta, y no un
+    apaño estático [p, p]?  El planificador, cuando no consigue avanzar, puede
+    devolver una trayectoria de un solo punto que 'planificar_orden' envuelve
+    como [p, p]: no es None, así que el conteo de fallos la daba por buena y el
+    vehículo se quedaba CONGELADO en la animación aunque tuviera camino libre.
+    Una ruta estática solo es legítima si el vehículo ya arranca en su meta."""
+    if traj is None or len(traj) < 2:
+        return False
+    x0, y0 = traj[0][0], traj[0][1]
+    xf, yf = traj[-1][0], traj[-1][1]
+    if math.hypot(xf - x0, yf - y0) > 0.1:
+        return True
+    # No se ha movido: solo vale si ya nació esencialmente sobre la meta.
+    return math.hypot(x0 - veh.meta[0], y0 - veh.meta[1]) <= 1.6
+
 
 def _ejecutar_planificacion(env, vehiculos, indices, base, calidad, modo_opt, max_cand, reubicable=False, inicios=None):
     import time
@@ -322,6 +338,12 @@ def _ejecutar_planificacion(env, vehiculos, indices, base, calidad, modo_opt, ma
             pl, vehiculos, orden, base, inicios=inicios,
             deadline_dur=PRESUPUESTO_VEHICULO_S
         )
+        # Un vehículo con ruta estática (no se mueve pese a no estar en su meta)
+        # cuenta como FALLO: así no se acepta un orden que deja coches congelados
+        # y esos vehículos pasan por el rescate en vez de mostrarse inmóviles.
+        for i in orden:
+            if trays[i] is not None and not _ruta_real(vehiculos[i], trays[i]):
+                trays[i] = None
         fallos = sum(1 for i in orden if trays[i] is None)
         if mejor is None or (fallos, coste) < (mejor[0], mejor[1]):
             mejor = (fallos, coste, trays, motivos, orden)
@@ -381,13 +403,15 @@ def _ejecutar_planificacion(env, vehiculos, indices, base, calidad, modo_opt, ma
                 traj = pl.planificar(veh, reservas, inicio=ini)
                 motivos[i] = pl.motivo
 
-            if traj is not None and len(traj) >= 2:
+            if _ruta_real(veh, traj):
                 trays[i] = traj
                 motivos[i] = "ok"
                 reservas.add(traj, veh.length, veh.width)
             elif traj:
+                # No consiguió avanzar: se deja aparcado como obstáculo estático,
+                # pero NO se marca "ok" (no ha hecho su ruta).
                 trays[i] = [traj[0], traj[0]]
-                motivos[i] = "ok"
+                reservas.add(trays[i], veh.length, veh.width)
 
     pl.deadline = None
     pl.max_exp = cap_prev
