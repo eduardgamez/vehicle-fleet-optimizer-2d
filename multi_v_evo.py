@@ -80,8 +80,11 @@ import math
 import os
 import time
 import heapq
+import queue
 import random
 import itertools
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor
 
 from math import cos, sin, tan, hypot, sqrt, atan2
 
@@ -383,6 +386,89 @@ def _k_aparca(px, py, pth, k0, kfin, Ld, Wd,
         if _k_hits_dyn(px, py, pth, kk, Ld, Wd, rx, roff, rlen, rlw, R, diag, mdin):
             return False
     return True
+
+
+@njit(cache=True)
+def _k_maniobra(x, y, th, k, gx, gy, gth, ang_tol,
+                L, dmax, ld, vmaxc, amax, goal_tol, v_tol, h,
+                veh_len, veh_wid, margin, mdin, diag, worldW, worldH,
+                oc, oax, obb, K, blc, blax, blbb, B,
+                rx, roff, rlen, rlw, R, res_maxlen):
+    """Conector REVERSIBLE para asentar el ÁNGULO DE LLEGADA en sitio apretado.
+
+    Cuando la búsqueda se atasca intentando encarar la meta con la orientación
+    exigida, este conector prueba una primera MANIOBRA —adelante o marcha atrás,
+    girando a un lado u otro y con distintas longitudes— que puede ALEJARSE de la
+    meta, y desde la pose resultante remata hacia adelante con _k_tiro. Es la
+    maniobra clásica de 'tirar un poco y rectificar' (o su versión en retroceso).
+
+    Al evaluarse como un TODO (segmento + remate, con validación de colisiones y
+    de aparcamiento definitivo), la heurística de distancia de la búsqueda no la
+    penaliza aunque el primer tramo se aleje. Devuelve (n, poses) con la maniobra
+    completa en poses[:n], o (-1, poses) si ninguna combinación cuadra. Se queda
+    con la maniobra total más CORTA entre las que funcionan (no sacrifica calidad)."""
+    out = np.empty((1400, 3))
+    Ld = veh_len + 2.0 * mdin
+    Wd = veh_wid + 2.0 * mdin
+    Lm = veh_len + 2.0 * margin
+    Wm = veh_wid + 2.0 * margin
+    dirs = (1.0, -1.0)                        # adelante / marcha atrás
+    steers = (-1.0, -0.5, 0.0, 0.5, 1.0)     # fracción del giro máximo
+    seg_max = 30                             # subpasos máximos del primer tramo
+    v_man = 0.5 * vmaxc
+    if v_man < 0.5:
+        v_man = 0.5
+    best_n = -1
+    best_total = 1e18
+    seg = np.empty((seg_max, 3))
+    for di in range(2):
+        dirf = dirs[di]
+        for si in range(5):
+            tdel = tan(steers[si] * dmax)
+            x1 = x; y1 = y; th1 = th
+            kk = k
+            for step in range(seg_max):
+                vv = dirf * v_man
+                th1 = th1 + (1.0 / L) * tdel * (vv * h)
+                x1 = x1 + cos(th1) * vv * h
+                y1 = y1 + sin(th1) * vv * h
+                kk += 1
+                if not _k_free_sb(x1, y1, th1, Lm, Wm, worldW, worldH,
+                                  oc, oax, obb, K, blc, blax, blbb, B, diag, margin):
+                    break                    # este tramo choca: se abandona
+                if _k_hits_dyn(x1, y1, th1, kk, Ld, Wd,
+                               rx, roff, rlen, rlw, R, diag, mdin):
+                    break
+                seg[step, 0] = x1; seg[step, 1] = y1; seg[step, 2] = th1
+                nseg = step + 1
+                if (step & 1) != 0:          # remata cada 2 subpasos (ahorra coste)
+                    continue
+                # Desde el fin del tramo (coche detenido) intenta el remate normal.
+                nt, pt = _k_tiro(x1, y1, th1, 0.0, kk, gx, gy, gth, 1, ang_tol,
+                                 L, dmax, ld, vmaxc, amax, goal_tol, v_tol, h,
+                                 veh_len, veh_wid, margin, mdin, diag, worldW, worldH,
+                                 oc, oax, obb, K, blc, blax, blbb, B,
+                                 rx, roff, rlen, rlw, R)
+                if nt <= 0:
+                    continue
+                kfin = kk + nt
+                kmax = kfin if kfin > res_maxlen else res_maxlen
+                if not _k_aparca(pt[nt - 1, 0], pt[nt - 1, 1], pt[nt - 1, 2],
+                                 kfin, kmax, Ld, Wd,
+                                 rx, roff, rlen, rlw, R, diag, mdin):
+                    continue
+                total = nseg + nt
+                if total < best_total:
+                    best_total = total
+                    m = 0
+                    for q in range(nseg):
+                        out[m, 0] = seg[q, 0]; out[m, 1] = seg[q, 1]
+                        out[m, 2] = seg[q, 2]; m += 1
+                    for q in range(nt):
+                        out[m, 0] = pt[q, 0]; out[m, 1] = pt[q, 1]
+                        out[m, 2] = pt[q, 2]; m += 1
+                    best_n = m
+    return best_n, out
 
 
 @njit(cache=True)
@@ -765,6 +851,12 @@ class Planificador:
         self.configurar_calidad(3)
         self.deadline = None
         self.tick = None
+        # Conector reversible: entra en acción solo cuando la búsqueda se atasca
+        # asentando el ángulo de llegada (más nodos que 'umbral_maniobra'), y como
+        # mucho una vez cada 'paso_maniobra' expansiones para no encarecerla.
+        self.umbral_maniobra = 80_000
+        self.paso_maniobra = 1500
+        self._exp_ult_maniobra = 0
 
     def configurar_calidad(self, nivel):
         """Equilibrio TIEMPO ↔ CALIDAD de ruta. A mayor nivel: más ángulos de giro
@@ -779,11 +871,11 @@ class Planificador:
         debajo de ~1.2 los casos difíciles se disparan en tiempo, reservado a la
         calidad alta."""
         tabla = {
-            1: (9,  14, 2.0,  300000),
-            2: (13, 13, 1.7,  500000),
-            3: (17, 12, 1.5,  800000),
-            4: (27, 10, 1.3, 1400000),
-            5: (41,  8, 1.15, 2400000),
+            1: (17, 12, 1.5,  800000),
+            2: (23, 11, 1.35, 1100000),
+            3: (31, 10, 1.25, 1600000),
+            4: (41,  8, 1.15, 2400000),
+            5: (55,  6, 1.05, 3600000),
         }
         n_dir, ang, peso, mx = tabla.get(int(nivel), tabla[3])
         half = n_dir // 2
@@ -1010,6 +1102,7 @@ class Planificador:
         abierto = [(self.peso_h * h0, 0, sx, sy, sth, 0.0, 0, 0.0)]
         mejor_g = {clave0: 0.0}
         expand = 0
+        self._exp_ult_maniobra = 0
         self._last_tick = time.perf_counter()
         self.motivo = "limite"
 
@@ -1024,7 +1117,7 @@ class Planificador:
                     return None
                 if self.tick is not None and now - self._last_tick > 0.01:
                     self._last_tick = now
-                    self.tick(expand, x, y, th)   # pose del nodo en exploración
+                    self.tick(expand)
 
             d_goal = math.hypot(x - gx, y - gy)
             if d_goal <= self.dist_tiro:
@@ -1078,6 +1171,27 @@ class Planificador:
                                  rx, roff, rlen, rlw, R, self.diag, self.margen_din):
                         self.motivo = "ok"
                         return self._reconstruir(padre_id, arista_id, cid, (sx, sy, sth))
+
+            # Conector REVERSIBLE (adelante-y-atrás para cuadrar el ángulo): solo
+            # cuando la búsqueda ya se atasca con el ángulo de llegada exigido y el
+            # coche está cerca de la meta. Se prueba de forma espaciada para no
+            # encarecer el caso normal. Si encuentra maniobra, cierra la ruta.
+            if (con_ang and d_goal <= self.dist_tiro
+                    and expand > self.umbral_maniobra
+                    and expand - self._exp_ult_maniobra >= self.paso_maniobra):
+                self._exp_ult_maniobra = expand
+                nm, pm = _k_maniobra(x, y, th, k, gx, gy, gth, ang_tol,
+                                     L, dmax, self.ld_tiro, self.v_max_c, self.a_max,
+                                     self.goal_tol_fin, self.v_tol, h,
+                                     self._len, self._wid, self.margen, self.margen_din,
+                                     self.diag, W, H, oc, oax, obb, K,
+                                     blc, blax, blbb, B, rx, roff, rlen, rlw, R,
+                                     res_maxlen)
+                if nm > 0:
+                    maniobra = [(pm[i, 0], pm[i, 1], pm[i, 2]) for i in range(nm)]
+                    base = self._reconstruir(padre_id, arista_id, cid, (sx, sy, sth))
+                    self.motivo = "ok"
+                    return base + maniobra
 
             if k >= self.k_max:
                 continue
@@ -1154,6 +1268,10 @@ def warmup():
             1.3, 0.7, 0.1, 0.15, 1.48, W, H, oc, oax, obb, 1,
             eb, eb, ebb, 0, rx, roff, rlen, rlw, 1)
     _k_aparca(2.0, 2.0, 0.0, 0, 1, 1.6, 1.0, rx, roff, rlen, rlw, 1, 1.48, 0.15)
+    _k_maniobra(2.0, 2.0, 0.0, 0, 6.0, 6.0, 0.0, 0.2,
+                0.7, 0.6, 2.0, 2.5, 1.0, 0.2, 0.45, 0.1,
+                1.3, 0.7, 0.1, 0.15, 1.48, W, H, oc, oax, obb, 1,
+                eb, eb, ebb, 0, rx, roff, rlen, rlw, 1, 1)
     _k_occ(4, 4, 0.5, 0.45, W, H, oc, oax, obb, 1)
 
 
@@ -1294,6 +1412,77 @@ def planificar_orden(planificador, vehiculos, orden, reservas_base,
             trays[idx] = None
             coste += PENAL_FALLO
     return trays, motivos, coste
+
+
+# --------------------------------------------------------------------------- #
+# EVALUACIÓN MULTINÚCLEO de los órdenes candidatos
+# --------------------------------------------------------------------------- #
+# Cada orden candidato es una planificación cooperativa INDEPENDIENTE: parte de
+# las mismas reservas base y produce su propio (trays, motivos, coste). Por eso
+# se reparten los órdenes entre varios procesos —uno por núcleo utilizable— y se
+# elige el mejor, exactamente igual que en el bucle secuencial pero en paralelo.
+# Se usa el arranque "spawn" (idéntico en Apple/Intel/AMD, Windows y Linux) y la
+# caché en disco de Numba, así que cada proceso sólo compila la primera vez.
+
+
+def nucleos_disponibles():
+    """Núcleos realmente utilizables. Respeta la afinidad/cgroups donde exista
+    (Linux); si no, recurre al recuento total de CPUs."""
+    try:
+        return max(1, len(os.sched_getaffinity(0)))
+    except AttributeError:
+        return max(1, os.cpu_count() or 1)
+
+
+# Estado propio de cada proceso worker: se construye UNA vez (en el inicializador)
+# y se reutiliza para todos los órdenes que le toquen a ese proceso.
+_WK = {}
+
+
+def _wk_init(entorno, vehiculos, reservas_base, calidad, inicios, cola, contador):
+    """Inicializador de cada proceso: compila los núcleos (caché en disco), crea
+    su propio planificador y le asigna un identificador de núcleo correlativo."""
+    warmup()
+    pl = Planificador(entorno)
+    pl.configurar_calidad(calidad)
+    with contador.get_lock():
+        wid = contador.value
+        contador.value += 1
+    _WK.update(pl=pl, vehiculos=vehiculos, reservas=reservas_base,
+               inicios=inicios, cola=cola, wid=wid, ult=0.0)
+
+
+def _wk_eval(args):
+    """Evalúa UN orden candidato en el proceso worker y devuelve su resultado.
+    Publica el progreso (nodos del vehículo en curso) en la cola compartida."""
+    orden, max_exp, deadline_dur = args
+    pl = _WK["pl"]
+    cola = _WK["cola"]
+    wid = _WK["wid"]
+    pl.max_exp = max_exp
+    pl.deadline = time.perf_counter() + deadline_dur
+
+    def tick(expand):
+        ahora = time.perf_counter()
+        if ahora - _WK["ult"] >= 0.08:          # limita el tráfico entre procesos
+            _WK["ult"] = ahora
+            try:
+                cola.put_nowait((wid, expand))
+            except Exception:
+                pass
+
+    pl.tick = tick
+    try:
+        trays, motivos, coste = planificar_orden(
+            pl, _WK["vehiculos"], orden, _WK["reservas"], inicios=_WK["inicios"])
+    finally:
+        pl.tick = None
+    fallos = sum(1 for i in orden if trays[i] is None)
+    try:
+        cola.put_nowait((wid, 0))               # ese núcleo queda libre
+    except Exception:
+        pass
+    return orden, fallos, coste, trays, motivos
 
 
 # --------------------------------------------------------------------------- #
@@ -1510,7 +1699,6 @@ class App:
 
         self._ocupado = False
         self._plan_msg = ""
-        self._veh_actual = 0          # vehículo cuya búsqueda se está dibujando
 
         self._construir_ui()
         self.env.generar(0.0)
@@ -1544,6 +1732,9 @@ class App:
     def _construir_ui(self):
         tk = self.tk
         from tkinter import ttk
+        # Estilo para destacar ligeramente el botón principal (Calcular y simular).
+        estilo = ttk.Style()
+        estilo.configure("Destacado.TButton", font=("", 12, "bold"))
         cont = ttk.Frame(self.root, padding=8)
         cont.grid(row=0, column=0)
 
@@ -1607,6 +1798,20 @@ class App:
         self.e_cand = self._campo(panel, fila, "Órdenes a explorar (máx):", "12")
 
         sep()
+        # Botón principal destacado.
+        ttk.Button(panel, text="▶  Calcular y simular", style="Destacado.TButton",
+                   command=self._seguro(self.calcular_y_simular)).grid(
+            row=fila[0], column=0, columnspan=2, sticky="ew", pady=1)
+        fila[0] += 1
+        for txt, cmd in (("⟳  Nuevas rutas para ids del texto", self.aplicar_nuevas_rutas),
+                         ("↺  Reproducir de nuevo", self.reproducir),
+                         ("⏸  Pausar / reanudar", self.pausar),
+                         ("⟲  Reiniciar", self.reiniciar)):
+            ttk.Button(panel, text=txt, command=self._seguro(cmd)).grid(
+                row=fila[0], column=0, columnspan=2, sticky="ew", pady=1)
+            fila[0] += 1
+
+        sep()
         ttk.Label(panel, text="Mapa", font=("", 11, "bold")).grid(
             row=fila[0], column=0, columnspan=2, sticky="w")
         fila[0] += 1
@@ -1618,17 +1823,7 @@ class App:
                 row=fila[0], column=0, columnspan=2, sticky="ew", pady=1)
             fila[0] += 1
 
-
-
         sep()
-        for txt, cmd in (("▶  Calcular y simular", self.calcular_y_simular),
-                         ("⟳  Nuevas rutas para ids del texto", self.aplicar_nuevas_rutas),
-                         ("↺  Reproducir de nuevo", self.reproducir),
-                         ("⏸  Pausar / reanudar", self.pausar),
-                         ("⟲  Reiniciar", self.reiniciar)):
-            ttk.Button(panel, text=txt, command=self._seguro(cmd)).grid(
-                row=fila[0], column=0, columnspan=2, sticky="ew", pady=1)
-            fila[0] += 1
         ttk.Button(panel, text="✕  Salir", command=self.root.destroy).grid(
             row=fila[0], column=0, columnspan=2, sticky="ew", pady=(1, 0))
         fila[0] += 1
@@ -1981,26 +2176,9 @@ class App:
             warmup()
             self._warmed = True
 
-    def _tick_plan(self, expand, x=None, y=None, th=None):
+    def _tick_plan(self, expand):
         self.estado.set(f"{self._plan_msg}  ({expand:,} nodos explorados)")
-        if x is not None:
-            self._sombra_busqueda(x, y, th)
         self.root.update()
-
-    def _sombra_busqueda(self, x, y, th):
-        """Dibuja una sombra translúcida del vehículo que se está planificando en
-        la pose que la búsqueda explora ahora mismo. Se actualiza cada ~0.15 s (no
-        en cada nodo: son demasiados), así que da una idea de por dónde busca el
-        ordenador sin intentar animar cada expansión."""
-        if not (0 <= self._veh_actual < len(self.vehiculos)):
-            return
-        veh = self.vehiculos[self._veh_actual]
-        col = PALETA[veh.idx % len(PALETA)]
-        c = self.canvas
-        c.delete("busqueda")             # solo la sombra anterior; el fondo se queda
-        poly = obb_corners(x, y, th, veh.length, veh.width)
-        c.create_polygon(self._poly_px(poly), outline=col, fill=col,
-                         stipple="gray25", width=1, tags="busqueda")
 
     def _planificar_flota(self, indices, reservas_base, inicios, reubicable):
         """Optimiza la flota: genera los órdenes candidatos según el modo elegido,
@@ -2018,39 +2196,53 @@ class App:
         mejor = None            # (fallos, coste, trays, motivos, orden)
         try:
             explorar = len(ordenes) > 1
-            for oi, orden in enumerate(ordenes):
-                if not self.root.winfo_exists():
-                    return {}, {}
-                etiqueta = (f"Orden {oi + 1}/{len(ordenes)} "
-                            f"[{'·'.join(str(self.vehiculos[i].vid) for i in orden)}]"
-                            if explorar else "Planificación cooperativa")
+            # Con varios órdenes y varios núcleos, se evalúan EN PARALELO (un
+            # proceso por núcleo). Con uno solo, o si el paralelo falla por
+            # cualquier motivo, se usa el bucle secuencial de siempre.
+            hecho_paralelo = False
+            if explorar and nucleos_disponibles() >= 2 and n >= 3:
+                try:
+                    dur = max(10.0, 3.0 * n)
+                    mejor = self._evaluar_ordenes_paralelo(
+                        ordenes, reservas_base, inicios, cap_prev, dur)
+                    hecho_paralelo = True
+                    if mejor is None:            # ventana cerrada durante el cálculo
+                        return {}, {}
+                except Exception:
+                    hecho_paralelo = False       # se recae al modo secuencial
 
-                def tick_veh(pos, idx, _et=etiqueta):
-                    self._veh_actual = idx
-                    self._plan_msg = (f"{_et} · vehículo {pos + 1}/{n} "
-                                      f"(id {self.vehiculos[idx].vid})")
-                    self.estado.set(self._plan_msg + "…")
-                    self.root.update()
+            if not hecho_paralelo:
+                mejor = None
+                for oi, orden in enumerate(ordenes):
+                    if not self.root.winfo_exists():
+                        return {}, {}
+                    etiqueta = (f"Orden {oi + 1}/{len(ordenes)} "
+                                f"[{'·'.join(str(self.vehiculos[i].vid) for i in orden)}]"
+                                if explorar else "Planificación cooperativa")
 
-                if explorar:
-                    # Presupuesto por candidato: cap de calidad + límite temporal,
-                    # para que explorar muchos órdenes siga siendo interactivo.
-                    pl.max_exp = cap_prev
-                    pl.deadline = time.perf_counter() + max(6.0, 1.5 * n)
-                else:
-                    pl.max_exp = CAP_COMPLETO
-                    pl.deadline = None
-                trays, motivos, coste = planificar_orden(
-                    pl, self.vehiculos, orden, reservas_base,
-                    inicios=inicios, tick_veh=tick_veh)
-                fallos = sum(1 for i in orden if trays[i] is None)
-                if mejor is None or (fallos, coste) < (mejor[0], mejor[1]):
-                    mejor = (fallos, coste, trays, motivos, orden)
-                if fallos == 0 and not explorar:
-                    break
-                if explorar and mejor[0] == 0 and oi >= 2 and modo_opt == "prioridades":
-                    # Con prioridades estrictas basta el primer orden sin fallos.
-                    pass
+                    def tick_veh(pos, idx, _et=etiqueta):
+                        self._plan_msg = (f"{_et} · vehículo {pos + 1}/{n} "
+                                          f"(id {self.vehiculos[idx].vid})")
+                        self.estado.set(self._plan_msg + "…")
+                        self.root.update()
+
+                    if explorar:
+                        # Presupuesto por candidato: cap de calidad + límite
+                        # temporal, para que explorar muchos órdenes siga siendo
+                        # interactivo.
+                        pl.max_exp = cap_prev
+                        pl.deadline = time.perf_counter() + max(10.0, 3.0 * n)
+                    else:
+                        pl.max_exp = CAP_COMPLETO
+                        pl.deadline = None
+                    trays, motivos, coste = planificar_orden(
+                        pl, self.vehiculos, orden, reservas_base,
+                        inicios=inicios, tick_veh=tick_veh)
+                    fallos = sum(1 for i in orden if trays[i] is None)
+                    if mejor is None or (fallos, coste) < (mejor[0], mejor[1]):
+                        mejor = (fallos, coste, trays, motivos, orden)
+                    if fallos == 0 and not explorar:
+                        break
 
             fallos, _, trays, motivos, orden = mejor
             # ---- rescate de los vehículos sin ruta en el mejor orden ---- #
@@ -2066,7 +2258,6 @@ class App:
                     if trays[i] is not None:
                         continue
                     veh = self.vehiculos[i]
-                    self._veh_actual = i
                     self._plan_msg = (f"Rescate del vehículo id {veh.vid} "
                                       "(búsqueda exhaustiva)")
                     self.estado.set(self._plan_msg + "…")
@@ -2096,6 +2287,69 @@ class App:
             pl.tick = None
             pl.deadline = None
             pl.max_exp = cap_prev
+
+    def _evaluar_ordenes_paralelo(self, ordenes, reservas_base, inicios,
+                                  max_exp, dur):
+        """Evalúa los órdenes candidatos repartidos entre los núcleos disponibles
+        (un proceso por núcleo, hasta tantos como órdenes). Devuelve el mejor
+        (fallos, coste, trays, motivos, orden), o None si se cierra la ventana.
+
+        Mientras corre, muestra abajo cuántos núcleos están trabajando y los
+        nodos que explora cada uno en el vehículo que planifica en ese momento."""
+        ctx = multiprocessing.get_context("spawn")
+        nucleos = nucleos_disponibles()
+        workers = max(1, min(len(ordenes), nucleos))
+        cola = ctx.Queue()
+        contador = ctx.Value("i", 0)
+        calidad = int(round(float(self.calidad.get())))
+        nodos = {}                     # wid -> últimos nodos reportados
+        mejor = None
+        ex = ProcessPoolExecutor(
+            max_workers=workers, mp_context=ctx, initializer=_wk_init,
+            initargs=(self.env, self.vehiculos, reservas_base, calidad,
+                      inicios, cola, contador))
+        try:
+            fut_idx = {ex.submit(_wk_eval, (orden, max_exp, dur)): oi
+                       for oi, orden in enumerate(ordenes)}
+            pendientes = set(fut_idx)
+            total = len(pendientes)
+            clave_mejor = None         # (fallos, coste, idx): desempata por índice
+            while pendientes:
+                if not self.root.winfo_exists():
+                    return None
+                while True:            # vaciar la cola de progreso
+                    try:
+                        wid, expand = cola.get_nowait()
+                    except queue.Empty:
+                        break
+                    nodos[wid] = expand
+                for f in [f for f in pendientes if f.done()]:
+                    pendientes.discard(f)
+                    try:
+                        orden, fallos, coste, trays, motivos = f.result()
+                    except Exception:
+                        continue
+                    clave = (fallos, coste, fut_idx[f])
+                    if clave_mejor is None or clave < clave_mejor:
+                        clave_mejor = clave
+                        mejor = (fallos, coste, trays, motivos, orden)
+                activos = min(workers, len(pendientes))
+                detalle = "   ".join(f"núcleo {w + 1}: {nodos.get(w, 0):,}"
+                                     for w in range(workers))
+                self._plan_msg = (
+                    f"Explorando {total} órdenes en paralelo · "
+                    f"{activos}/{nucleos} núcleos activos "
+                    f"({total - len(pendientes)}/{total} listos)")
+                self.estado.set(f"{self._plan_msg}   ⟶   {detalle}")
+                self.root.update()
+                time.sleep(0.02)
+        finally:
+            try:
+                ex.shutdown(wait=False, cancel_futures=True)
+            except TypeError:          # cancel_futures: Python < 3.9
+                ex.shutdown(wait=False)
+            cola.close()
+        return mejor
 
     def _aplicar_resultado(self, indices, trays, motivos, k_inicio):
         """Vuelca las trayectorias en los vehículos (desplazadas k_inicio pasos si
