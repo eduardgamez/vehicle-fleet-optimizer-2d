@@ -459,16 +459,13 @@ def _reubicar(env, veh, vehiculos):
     veh.meta_th = thm
     return True
 
-#  Techo de NODOS CREADOS POR VEHÍCULO. Acota la MEMORIA del grafo de búsqueda.
-#  Es el ÚNICO criterio de "cuándo rendirse": no hay plazo de tiempo, igual que
-#  la relajación del ángulo de llegada se mide en nodos-en-meta, no en segundos.
-#
-#  Por defecto es ALTO (como el escritorio) para encontrar también las rutas
-#  difíciles: en localhost hay memoria de sobra. En Render (plan free, 512 MB)
-#  conviene bajarlo con la variable de entorno CAP_NODOS para no agotar la RAM;
-#  se fija en render.yaml. Como la planificación en el navegador ya NO bloquea
-#  (corre en segundo plano con barra de progreso), tardar más no rompe nada.
-CAP_NODOS = int(os.environ.get("CAP_NODOS", 1_500_000))
+#  Si se ejecuta en Render (donde se define la variable de entorno CAP_NODOS), se
+#  limita la memoria para no agotar los 512 MB. En local (sin CAP_NODOS), se deja
+#  en None para usar el límite nativo de la calidad elegida.
+CAP_NODOS = os.environ.get("CAP_NODOS")
+if CAP_NODOS is not None:
+    CAP_NODOS = int(CAP_NODOS)
+
 
 def _ruta_real(veh, traj):
     """¿'traj' es una ruta que de verdad LLEVA el vehículo a su meta, y no un
@@ -515,7 +512,8 @@ def _ejecutar_planificacion(env, vehiculos, indices, base, calidad, modo_opt, ma
     for pos, i in enumerate(orden):
         veh = vehiculos[i]
         ini = inicios.get(i) if inicios else None
-        pl.max_nodos = CAP_NODOS                  # presupuesto de nodos (memoria)
+        if CAP_NODOS is not None:
+            pl.max_nodos = CAP_NODOS                  # presupuesto de nodos (memoria)
         pl.max_exp = 20_000_000                   # las expansiones no son el freno
         pl.deadline = None                        # sin límite de tiempo: solo nodos
         # pose0: un bloqueo de meta ajena que SOLAPE el arranque del vehículo
