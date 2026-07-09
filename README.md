@@ -11,13 +11,54 @@ las puede reproducir.
 - **Mapas personalizados:** admite importar imágenes como mapas de obstáculos, así como guardar y cargar entornos propios.
 - **Control calidad-tiempo:** se puede ajustar el equilibrio entre la calidad de las rutas y el tiempo de cálculo.
 
-Ejecutar:
+## Modos de ejecución
+
+El proyecto ofrece dos formas principales de ejecutarse:
+
+### 1. Aplicación de escritorio (Tkinter)
+
+Ejecuta el simulador completo directamente en una ventana nativa de escritorio:
 
 ```bash
 python3 multi_v_evo.py
 ```
 
-El archivo `multi_vehiculo.py` incluido es una versión reducida. No tiene algunas características avanzadas como importar mapas desde imágenes, modos de optimización por prioridades, ángulos de llegada específicos y reasignación de destinos.
+### 2. Servidor e interfaz web moderna
+
+Para ejecutar el panel web en el navegador, inicia el servidor Flask:
+
+```bash
+python3 server.py
+```
+
+Abre tu navegador en `http://localhost:5000` para acceder a la interfaz web interactiva.
+
+---
+
+## Estructura del proyecto y descripción de archivos
+
+El repositorio se compone de los siguientes archivos y carpetas:
+
+### Núcleo de simulación
+- **`multi_v_evo.py`** — Simulador principal y aplicación de escritorio con interfaz gráfica en Tkinter. Implementa la cinemática realista (modelo de bicicleta), planificación en espacio continuo con **Hybrid A\*** cooperativo y coordinación espacio-tiempo, detección exacta de colisiones (OBB/SAT), optimización global y por grupos de prioridad, ángulos de llegada, importación/exportación de mapas y compilación JIT de alto rendimiento con **Numba**.
+- **`multi_vehiculo.py`** — Versión reducida y ligera del simulador de escritorio. Contiene el motor de física y planificación Hybrid A*, pero omite funciones avanzadas como importar mapas desde imágenes, modos de optimización por prioridades o ángulos de llegada personalizados.
+
+### Servidor e interfaz web (`web/`)
+- **`server.py`** — Servidor web basado en Flask y Gunicorn. Expone el motor de `multi_v_evo.py` mediante una API REST asíncrona (`/api/simular`, `/api/*/estado`, `/api/misiones`, etc.). Ejecuta las planificaciones en hilos de fondo con control de concurrencia y permite al navegador consultar el progreso en tiempo real.
+- **`web/index.html`** — Estructura HTML de la interfaz web moderna. Incluye el panel lateral de parámetros, controles segmentados para selección de modos, deslizador de calidad de ruta, controles de ejecución y el lienzo (`<canvas>`) para visualizar la animación.
+- **`web/script.js`** — Lógica del cliente web. Gestiona el renderizado y animación de la flota en el canvas HTML5 a 60 FPS, la comunicación asíncrona con el servidor, el seguimiento de la barra de progreso y la edición de vehículos en formato JSON.
+- **`web/styles.css`** — Estilos visuales del panel web. Proporciona una interfaz limpia y responsiva con variables CSS, controles adaptados tanto para pantallas de escritorio como para dispositivos móviles.
+
+### Mapas y datos
+- **`mapas/`** — Directorio donde se almacenan y cargan los mapas de obstáculos exportados o importados desde imágenes en formato JSON.
+
+### Configuración y despliegue
+- **`requirements.txt`** — Lista de librerías de Python requeridas (`flask`, `numpy`, `numba`, `pillow`, `gunicorn`).
+- **`render.yaml`** — Configuración de despliegue como servicio web en Render, configurando workers de Gunicorn, hilos de trabajo y la caché de compilación de Numba.
+- **`runtime.txt`** — Especifica la versión del intérprete de Python (`python-3.12.4`) para entornos de despliegue en la nube.
+- **`LICENSE`** — Archivo con la licencia de distribución del proyecto.
+
+---
 
 ## Cómo funciona por dentro (resumen)
 
@@ -142,14 +183,19 @@ importado que esté en pantalla.
 
 ## Instalación
 
-Librerías necesarias: `numpy`, `numba` (y `pillow` opcional, para importar
-imágenes JPG/BMP como mapas; sin él se admiten PNG/GIF/PPM).
+Para instalar todas las librerías necesarias tanto para la versión de escritorio como para la interfaz web y el servidor (`numpy`, `numba`, `pillow`, `flask`, `gunicorn`):
+
+```bash
+pip install -r requirements.txt
+```
+
+Si únicamente deseas ejecutar el simulador local en escritorio, puedes instalar solo las librerías base:
 
 ```bash
 pip install numpy numba pillow
 ```
 
-En Linux además hace falta tkinter:
+En Linux además hace falta tkinter para la versión de escritorio:
 
 ```bash
 sudo apt install python3-tk      # Debian/Ubuntu
