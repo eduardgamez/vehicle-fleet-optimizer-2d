@@ -271,7 +271,10 @@ def _veh_a_spec(v):
         "ancho": round(v.width, 2),
         "v_max": round(v.v_max, 2),
         "a_max": round(v.a_max, 2),
-        "giro_max": round(v.delta_max, 1),
+        # delta_max se guarda en RADIANES; el texto de especificaciones va en
+        # GRADOS. Sin la conversión, el texto exportado decía "giro_max: 0.6"
+        # y al re-parsearlo fallaba la validación (mínimo 5 grados).
+        "giro_max": round(math.degrees(v.delta_max), 1),
         "grupo": getattr(v, "grupo", 1),
         "prioridad": getattr(v, "prioridad", 1),
     }
@@ -418,7 +421,12 @@ def mapa_cargar():
         if "rects" in data and data["rects"] is not None:
             env_actual.desde_rects(data["rects"], data.get("origen", "cargado"))
         elif "obstaculos" in data:
-            env_actual.obstaculos = data["obstaculos"]
+            # _empaquetar reconstruye también los arrays NumPy de colisión
+            # (np_c/np_ax/np_bb); asignar solo .obstaculos dejaba al
+            # planificador usando los OBB del mapa ANTERIOR.
+            polys = [[(float(pt[0]), float(pt[1])) for pt in pol]
+                     for pol in data["obstaculos"]]
+            env_actual._empaquetar(polys)
             env_actual.origen = data.get("origen", "cargado")
             env_actual.rects = None
         vehiculos_actuales = []
@@ -451,10 +459,9 @@ def _reubicar(env, veh, vehiculos):
     veh.meta_th = thm
     return True
 
-#  Techo de NODOS CREADOS POR VEHÍCULO. En vez de un plazo de tiempo (que corta
-#  la búsqueda aunque la ruta exista y deja vehículos aparcados sin motivo), cada
-#  vehículo busca hasta ENCONTRAR ruta o hasta crear este número de nodos, sin
-#  límite de tiempo. Al ser nodos CREADOS, también acota la MEMORIA.
+#  Techo de NODOS CREADOS POR VEHÍCULO. Acota la MEMORIA del grafo de búsqueda.
+#  Es el ÚNICO criterio de "cuándo rendirse": no hay plazo de tiempo, igual que
+#  la relajación del ángulo de llegada se mide en nodos-en-meta, no en segundos.
 #
 #  Por defecto es ALTO (como el escritorio) para encontrar también las rutas
 #  difíciles: en localhost hay memoria de sobra. En Render (plan free, 512 MB)
@@ -485,9 +492,11 @@ def _ejecutar_planificacion(env, vehiculos, indices, base, calidad, modo_opt, ma
     """Planificación SECUENCIAL cooperativa (igual que el escritorio en modo
     secuencial): un ÚNICO orden de prioridad, se planifica vehículo a vehículo y
     cada uno se RESERVA como obstáculo (móvil si logra ruta, estático si no)
-    antes de pasar al siguiente. Búsqueda sin límite de tiempo, con un presupuesto
-    ALTO de nodos (CAP_NODOS) para encontrar también las rutas difíciles. Si un
-    vehículo no llega, queda aparcado y bloquea a los de detrás.
+    antes de pasar al siguiente. Presupuesto por vehículo: SOLO nodos
+    (CAP_NODOS, memoria); sin límite de tiempo, igual que la relajación del
+    ángulo de llegada, que se mide en nodos-en-meta, no en segundos. Si un
+    vehículo no llega, queda aparcado y bloquea a los de detrás (en modo
+    aleatorio se intenta reubicarlo antes con extremos nuevos).
 
     'progreso' (opcional): callback(texto) para informar del avance en vivo
     (vehículo actual y nodos explorados), usado por la ejecución en segundo
@@ -502,12 +511,18 @@ def _ejecutar_planificacion(env, vehiculos, indices, base, calidad, modo_opt, ma
     reservas = base.copia()
     trays = {}
     motivos = {}
+    import time as _t
     for pos, i in enumerate(orden):
         veh = vehiculos[i]
+        ini = inicios.get(i) if inicios else None
         pl.max_nodos = CAP_NODOS                  # presupuesto de nodos (memoria)
         pl.max_exp = 20_000_000                   # las expansiones no son el freno
         pl.deadline = None                        # sin límite de tiempo: solo nodos
-        pl.bloqueos = mve.bloqueos_metas(vehiculos, orden, excepto=i)
+        # pose0: un bloqueo de meta ajena que SOLAPE el arranque del vehículo
+        # se omite; si no, nace atrapado y da "sin_ruta" al instante.
+        pl.bloqueos = mve.bloqueos_metas(
+            vehiculos, orden, excepto=i,
+            pose0=(ini if ini is not None else veh.inicio))
         if progreso is not None:
             def _tick(expand, _p=pos, _vid=veh.vid, _n=len(orden)):
                 progreso(f"Planificando vehículo {_p + 1}/{_n} (id {_vid}) · "
@@ -516,13 +531,25 @@ def _ejecutar_planificacion(env, vehiculos, indices, base, calidad, modo_opt, ma
         else:
             pl.tick = None
 
-        ini = inicios.get(i) if inicios else None
-        import time as _t
         _t0 = _t.perf_counter()
         traj = pl.planificar(veh, reservas, inicio=ini)
         _dt = _t.perf_counter() - _t0
         motivos[i] = pl.motivo
         ok = _ruta_real(veh, traj)
+        # REUBICACIÓN (modo aleatorio, como el escritorio): si el vehículo no
+        # tiene salida donde nació, se le buscan extremos nuevos. Antes esta
+        # función existía (_reubicar) pero nunca se llamaba.
+        intentos = 0
+        while (not ok and reubicable and inicios is None
+               and pl.motivo == "sin_ruta" and intentos < 12):
+            if not _reubicar(env, veh, vehiculos):
+                break
+            pl.bloqueos = mve.bloqueos_metas(vehiculos, orden, excepto=i,
+                                             pose0=veh.inicio)
+            traj = pl.planificar(veh, reservas)
+            motivos[i] = pl.motivo
+            ok = _ruta_real(veh, traj)
+            intentos += 1
         # DIAGNÓSTICO (consola local / logs de Render): por qué cada vehículo
         # logró o no su ruta, con nodos creados/expandidos y tiempo:
         #   sin_ruta   → encajonado: algo (otro vehículo/obstáculo) lo bloquea

@@ -116,13 +116,12 @@ A_LAT_MAX = 1.5
 
 
 # Relajación del ÁNGULO DE LLEGADA (red de seguridad para que todo vehículo
-# LLEGUE aunque no logre encajar la orientación exacta). Se respeta el ángulo
-# exacto hasta REL_INI nodos creados; a partir de ahí la tolerancia se ensancha
-# de forma lineal a lo largo de REL_SPAN nodos hasta aceptar cualquier
-# orientación. Umbrales absolutos: acotan el tiempo del caso difícil por igual
-# en localhost y en Render, sin depender del techo de memoria.
-REL_INI = 15_000
-REL_SPAN = 200_000
+# LLEGUE aunque no logre encajar la orientación exacta). La tolerancia se
+# ensancha SOLO según el ESFUERZO EN NODOS EXPLORADOS DENTRO DE LA ZONA DE LA
+# META (d_goal ≤ dist_tiro), sin relojes de tiempo: así el resultado no
+# depende de la velocidad de la máquina y una ruta larga no llega con la
+# tolerancia ya regalada solo por el viaje. Los umbrales (por nivel de
+# calidad) están en la tabla de configurar_calidad.
 
 
 # --------------------------------------------------------------------------- #
@@ -389,13 +388,6 @@ def _k_tiro(x, y, th, v, k, gx, gy, gth, con_ang, ang_tol,
         largo_max = 2.4 * d0 + 4.0 * goal_tol + 6.0
     else:
         largo_max = 1.5 * d0 + 2.0 * goal_tol
-    # Velocidad tope del remate: no ACELERAR de golpe al tomar el relevo. El
-    # remate es una maniobra de finalización; si la búsqueda llegó despacio
-    # (venía de una curva), el conector no debe pegar un acelerón para luego
-    # frenar en la curva final (el molesto "frena y vuelve a arrancar"). Se
-    # permite como mucho la velocidad de entrada, con un suelo de 0.5·vmax para
-    # que no se arrastre. Solo puede FRENAR respecto a esto (para la meta o por
-    v_tope = v if v >= 0.1 else vmaxc
     kk = k
     for _ in range(900):
         d = hypot(gx - x, gy - y)
@@ -416,16 +408,25 @@ def _k_tiro(x, y, th, v, k, gx, gy, gth, con_ang, ang_tol,
         else:
             tx = gx; ty = gy
         v_ant = v
+        # FRENADA FÍSICA (v² = 2·a·d): la velocidad admisible en cada instante es
+        # la máxima desde la que aún puede detenerse en la meta con la
+        # deceleración disponible, medida sobre la distancia de RUTA restante
+        # (recta hasta el borde de la tolerancia + arco de corrección del rumbo
+        # si se exige ángulo de llegada). Lejos de la meta no limita (el remate
+        # cruza a vmax) y al acercarse impone la parábola de frenado exacta del
+        # vehículo: ni se pasa de largo (el umbral crece con v²/a, no con el
+        # tamaño del coche) ni recorre los últimos metros a paso de tortuga (la
+        # velocidad ya no queda congelada a la de entrada). El factor 0.85 deja
+        # margen para que el seguimiento (acotado por a_max) sea alcanzable, y
+        # el suelo v_tol/2 garantiza entrar en la meta sin estancarse.
         da_err = abs(atan2(sin(th - gth), cos(th - gth))) if con_ang == 1 else 0.0
         R_min = L / max(1e-3, tan(dmax))
-        d_freno = d + da_err * R_min
-        d_umbral = 2.0 * L
-        ang_ok = (con_ang == 0) or (da_err <= 1.5 * ang_tol)
-        if d_freno > d_umbral or not ang_ok:
-            v_des = v_tope
-        else:
-            ratio = d_freno / d_umbral if d_freno > 0.0 else 0.0
-            v_des = sqrt(ratio) * v_tope
+        d_freno = (d - goal_tol) + da_err * R_min
+        if d_freno < 0.0:
+            d_freno = 0.0
+        v_des = sqrt(0.25 * v_tol * v_tol + 2.0 * 0.85 * amax * d_freno)
+        if v_des > vmaxc:
+            v_des = vmaxc
         dv = max(-amax * h, min(amax * h, v_des - v))
         v = min(vmaxc, max(0.0, v + dv))
         alpha = atan2(ty - y, tx - x) - th
@@ -482,7 +483,7 @@ def _k_aparca(px, py, pth, k0, kfin, Ld, Wd,
 
 
 @njit(cache=True)
-def _k_maniobra(x, y, th, k, gx, gy, gth, ang_tol,
+def _k_maniobra(x, y, th, v0, k, gx, gy, gth, ang_tol,
                 L, dmax, ld, vmaxc, amax, goal_tol, v_tol, h,
                 veh_len, veh_wid, margin, mdin, diag, worldW, worldH,
                 oc, oax, obb, K, blc, blax, blbb, B,
@@ -494,6 +495,16 @@ def _k_maniobra(x, y, th, k, gx, gy, gth, ang_tol,
     girando a un lado u otro y con distintas longitudes— que puede ALEJARSE de la
     meta, y desde la pose resultante remata hacia adelante con _k_tiro. Es la
     maniobra clásica de 'tirar un poco y rectificar' (o su versión en retroceso).
+
+    SENTIDO Y VELOCIDAD DE ENTRADA ('v0'): una PARADA solo tiene sentido cuando se
+    CAMBIA de sentido. Por eso:
+      · Rama HACIA DELANTE: ARRASTRA la velocidad de entrada v0 (no frena en seco);
+        el tramo de reorientación enlaza DIRECTAMENTE con el remate _k_tiro, que
+        parte con esa velocidad y frena de forma continua hasta la meta. Así no se
+        inserta el 'frena y vuelve a arrancar' cuando el coche sigue de frente.
+      · Rama MARCHA ATRÁS (inversión de sentido): solo se prueba si el vehículo ya
+        llega casi parado (|v0| ≤ v_tol); arranca de v=0 y, tras el tramo, decelera
+        a v=0 antes de rematar hacia delante (la inversión pasa por velocidad nula).
 
     Al evaluarse como un TODO (segmento + remate, con validación de colisiones y
     de aparcamiento definitivo), la heurística de distancia de la búsqueda no la
@@ -512,24 +523,43 @@ def _k_maniobra(x, y, th, k, gx, gy, gth, ang_tol,
     v_man = 0.5 * vmaxc
     if v_man < 0.5:
         v_man = 0.5
+    va0 = v0 if v0 >= 0.0 else -v0            # rapidez de entrada
     best_n = -1
     best_total = 1e18
     # Segmento = rampa de aceleración (prefijo compartido) + cola de frenado.
     seg = np.empty((seg_max + tail_max, 3))
     for di in range(2):
         dirf = dirs[di]
+        adelante = dirf > 0.0
+        # La marcha atrás invierte el sentido: exige partir DETENIDO. No se prueba
+        # si el coche aún circula (frenar en seco para retroceder es imposible).
+        if not adelante and va0 > v_tol:
+            continue
         for si in range(5):
             frac = steers[si]
             x1 = x; y1 = y; th1 = th
             kk = k
-            vmag = 0.0                       # arranca PARADO: sin salto de velocidad
+            # HACIA DELANTE arrastra v0; MARCHA ATRÁS arranca PARADO.
+            vmag = va0 if adelante else 0.0
             for step in range(seg_max):
-                vmag = min(v_man, vmag + amax * h)
+                vmag_ant = vmag
+                # Aproxima la velocidad de crucero de maniobra respetando a_max en
+                # ambos sentidos: si se entra por encima, frena suave (no en seco);
+                # si por debajo, acelera. Con v0=0 (marcha atrás) es la rampa de
+                # siempre.
+                if vmag > v_man:
+                    vmag = vmag - amax * h
+                    if vmag < v_man:
+                        vmag = v_man
+                else:
+                    vmag = min(v_man, vmag + amax * h)
                 kap = abs(tan(frac * dmax)) / L
                 if kap > 1e-9:
                     v_turn = sqrt(A_LAT_MAX / kap)
                     if vmag > v_turn:
                         vmag = v_turn
+                        if vmag < vmag_ant - amax * h:   # descenso acotado: sin frenazo
+                            vmag = vmag_ant - amax * h
                 vv = dirf * vmag
                 fdel = tan(frac * dmax * (1.0 - STEER_SPEED_C * (vmag / vmaxc)))
                 th1 = th1 + (1.0 / L) * fdel * (vv * h)
@@ -546,37 +576,47 @@ def _k_maniobra(x, y, th, k, gx, gy, gth, ang_tol,
                 ncore = step + 1
                 if (step & 1) != 0:          # prueba a rematar cada 2 subpasos
                     continue
-                # COLA DE FRENADO: decelera hasta v=0 (respetando a_max) antes de
-                # cambiar de sentido, para que la inversión pase por velocidad
-                # nula y no haya un salto brusco. La pose final queda DETENIDA.
-                xt = x1; yt = y1; tht = th1; kt = kk; vt = vmag
-                ntail = 0
-                tail_ok = True
-                while vt > 1e-3 and ntail < tail_max:
-                    vt = vt - amax * h
-                    if vt < 0.0:
-                        vt = 0.0
-                    vvt = dirf * vt
-                    fdt = tan(frac * dmax * (1.0 - STEER_SPEED_C * (vt / vmaxc)))
-                    tht = tht + (1.0 / L) * fdt * (vvt * h)
-                    xt = xt + cos(tht) * vvt * h
-                    yt = yt + sin(tht) * vvt * h
-                    kt += 1
-                    if not _k_free_sb(xt, yt, tht, Lm, Wm, worldW, worldH,
-                                      oc, oax, obb, K, blc, blax, blbb, B, diag, margin):
-                        tail_ok = False; break
-                    if _k_hits_dyn(xt, yt, tht, kt, Ld, Wd,
-                                   rx, roff, rlen, rlw, rrad, R, diag, mdin):
-                        tail_ok = False; break
-                    seg[ncore + ntail, 0] = xt
-                    seg[ncore + ntail, 1] = yt
-                    seg[ncore + ntail, 2] = tht
-                    ntail += 1
-                if not tail_ok:
-                    continue
-                nseg = ncore + ntail
-                # Desde el fin del tramo (coche DETENIDO) intenta el remate normal.
-                nt, pt = _k_tiro(xt, yt, tht, 0.0, kt, gx, gy, gth, 1, ang_tol,
+                if adelante:
+                    # HACIA DELANTE: sin cambio de sentido → NADA de cola de frenado
+                    # ni parada intermedia. El remate _k_tiro enlaza con la velocidad
+                    # ACTUAL y frena de forma continua hasta la meta.
+                    xt = x1; yt = y1; tht = th1; kt = kk
+                    nseg = ncore
+                    v_rem = vmag
+                else:
+                    # MARCHA ATRÁS: cola de frenado hasta v=0 (respetando a_max) antes
+                    # de rematar hacia delante, para que la inversión pase por
+                    # velocidad nula. La pose final del tramo queda DETENIDA.
+                    xt = x1; yt = y1; tht = th1; kt = kk; vt = vmag
+                    ntail = 0
+                    tail_ok = True
+                    while vt > 1e-3 and ntail < tail_max:
+                        vt = vt - amax * h
+                        if vt < 0.0:
+                            vt = 0.0
+                        vvt = dirf * vt
+                        fdt = tan(frac * dmax * (1.0 - STEER_SPEED_C * (vt / vmaxc)))
+                        tht = tht + (1.0 / L) * fdt * (vvt * h)
+                        xt = xt + cos(tht) * vvt * h
+                        yt = yt + sin(tht) * vvt * h
+                        kt += 1
+                        if not _k_free_sb(xt, yt, tht, Lm, Wm, worldW, worldH,
+                                          oc, oax, obb, K, blc, blax, blbb, B, diag, margin):
+                            tail_ok = False; break
+                        if _k_hits_dyn(xt, yt, tht, kt, Ld, Wd,
+                                       rx, roff, rlen, rlw, rrad, R, diag, mdin):
+                            tail_ok = False; break
+                        seg[ncore + ntail, 0] = xt
+                        seg[ncore + ntail, 1] = yt
+                        seg[ncore + ntail, 2] = tht
+                        ntail += 1
+                    if not tail_ok:
+                        continue
+                    nseg = ncore + ntail
+                    v_rem = 0.0
+                # Remate: hacia delante arranca con la velocidad arrastrada; en
+                # retroceso, desde el coche DETENIDO.
+                nt, pt = _k_tiro(xt, yt, tht, v_rem, kt, gx, gy, gth, 1, ang_tol,
                                  L, dmax, ld, vmaxc, amax, goal_tol, v_tol, h,
                                  veh_len, veh_wid, margin, mdin, diag, worldW, worldH,
                                  oc, oax, obb, K, blc, blax, blbb, B,
@@ -600,6 +640,150 @@ def _k_maniobra(x, y, th, k, gx, gy, gth, ang_tol,
                         out[m, 0] = pt[q, 0]; out[m, 1] = pt[q, 1]
                         out[m, 2] = pt[q, 2]; m += 1
                     best_n = m
+    return best_n, out
+
+
+@njit(cache=True)
+def _k_seg(x, y, th, k, dirf, frac, npasos, L, dmax, vmaxc, amax, h,
+           Lm, Wm, Ld, Wd, worldW, worldH, oc, oax, obb, K,
+           blc, blax, blbb, B, rx, roff, rlen, rlw, rrad, R,
+           diag, margin, mdin, out, base):
+    """Tramo de maniobra con sentido (adelante/atrás) y giro CONSTANTES que
+    arranca y TERMINA PARADO: rampa de aceleración de 'npasos' subpasos + cola
+    de frenado hasta v=0 (la inversión de sentido siempre pasa por velocidad
+    nula). Escribe las poses en out[base:] y devuelve (n, x, y, th, k) con la
+    pose final; n = -1 si el tramo choca o se sale del mundo."""
+    v_man = 0.5 * vmaxc
+    if v_man < 0.5:
+        v_man = 0.5
+    tope_cola = amax * h * 60.0        # la cola de frenado debe caber en 60 subpasos
+    if v_man > tope_cola:
+        v_man = tope_cola
+    kap = abs(tan(frac * dmax)) / L
+    if kap > 1e-9:
+        v_turn = sqrt(A_LAT_MAX / kap)
+        if v_man > v_turn:
+            v_man = v_turn
+    n = 0
+    vmag = 0.0
+    for fase in range(2):
+        pasos = npasos if fase == 0 else 70
+        for _ in range(pasos):
+            if fase == 0:
+                vmag = min(v_man, vmag + amax * h)
+            else:
+                vmag -= amax * h
+                if vmag <= 1e-3:
+                    return n, x, y, th, k
+            vv = dirf * vmag
+            fdel = tan(frac * dmax * (1.0 - STEER_SPEED_C * (vmag / vmaxc)))
+            th = th + (1.0 / L) * fdel * (vv * h)
+            x = x + cos(th) * vv * h
+            y = y + sin(th) * vv * h
+            k += 1
+            if not _k_free_sb(x, y, th, Lm, Wm, worldW, worldH,
+                              oc, oax, obb, K, blc, blax, blbb, B, diag, margin):
+                return -1, x, y, th, k
+            if _k_hits_dyn(x, y, th, k, Ld, Wd,
+                           rx, roff, rlen, rlw, rrad, R, diag, mdin):
+                return -1, x, y, th, k
+            out[base + n, 0] = x; out[base + n, 1] = y; out[base + n, 2] = th
+            n += 1
+    return n, x, y, th, k
+
+
+@njit(cache=True)
+def _k_maniobra2(x, y, th, k, gx, gy, gth, ang_tol,
+                 L, dmax, ld, vmaxc, amax, goal_tol, v_tol, h,
+                 veh_len, veh_wid, margin, mdin, diag, worldW, worldH,
+                 oc, oax, obb, K, blc, blax, blbb, B,
+                 rx, roff, rlen, rlw, rrad, R, res_maxlen):
+    """Conector de DOS FASES (el 'cambio de sentido doble' de una maniobra de
+    tres puntos): tramo 1 adelante o atrás + tramo 2 en el sentido OPUESTO +
+    remate hacia delante con _k_tiro. Cubre el caso que la maniobra de una fase
+    no resuelve: el vehículo 'pasado' de su plaza que debe salir, invertir el
+    rumbo por tramos y entrar encarado con el ángulo exigido (p. ej. arrancar a
+    3 m de la meta mirando hacia ella pero teniendo que acabar mirando hacia
+    fuera). Cada combinación se valida entera (mundo, obstáculos, reservas y
+    aparcamiento definitivo) y gana la maniobra completa más corta. El remate
+    solo se intenta si la pose tras el tramo 2 ENCARA la zanahoria del eje de
+    llegada (filtro barato que descarta la mayoría de combinaciones)."""
+    out = np.empty((1400, 3))
+    seg1 = np.empty((120, 3))
+    seg2 = np.empty((120, 3))
+    dirs = (1.0, -1.0)
+    steers = (-1.0, -0.5, 0.0, 0.5, 1.0)
+    largos = (10, 22, 34)
+    best_n = -1
+    best_total = 1e18
+    Ld = veh_len + 2.0 * mdin
+    Wd = veh_wid + 2.0 * mdin
+    Lm = veh_len + 2.0 * margin
+    Wm = veh_wid + 2.0 * margin
+    for di in range(2):
+        d1 = dirs[di]
+        for s1 in range(5):
+            f1 = steers[s1]
+            for l1 in range(3):
+                n1, x1, y1, th1, k1 = _k_seg(
+                    x, y, th, k, d1, f1, largos[l1], L, dmax, vmaxc, amax, h,
+                    Lm, Wm, Ld, Wd, worldW, worldH, oc, oax, obb, K,
+                    blc, blax, blbb, B, rx, roff, rlen, rlw, rrad, R,
+                    diag, margin, mdin, seg1, 0)
+                if n1 < 0:
+                    continue
+                for s2 in range(5):
+                    f2 = steers[s2]
+                    for l2 in range(3):
+                        n2, x2, y2, th2, k2 = _k_seg(
+                            x1, y1, th1, k1, -d1, f2, largos[l2], L, dmax,
+                            vmaxc, amax, h, Lm, Wm, Ld, Wd, worldW, worldH,
+                            oc, oax, obb, K, blc, blax, blbb, B,
+                            rx, roff, rlen, rlw, rrad, R,
+                            diag, margin, mdin, seg2, 0)
+                        if n2 < 0:
+                            continue
+                        d2 = hypot(gx - x2, gy - y2)
+                        if d2 < 1e-6:
+                            continue
+                        s = 0.85 * d2
+                        smax = 4.0 * L
+                        if s > smax:
+                            s = smax
+                        tx = gx - s * cos(gth); ty = gy - s * sin(gth)
+                        alpha = atan2(ty - y2, tx - x2) - th2
+                        alpha = atan2(sin(alpha), cos(alpha))
+                        if alpha > 0.9 or alpha < -0.9:
+                            continue
+                        nt, pt = _k_tiro(x2, y2, th2, 0.0, k2, gx, gy, gth,
+                                         1, ang_tol, L, dmax, ld, vmaxc, amax,
+                                         goal_tol, v_tol, h, veh_len, veh_wid,
+                                         margin, mdin, diag, worldW, worldH,
+                                         oc, oax, obb, K, blc, blax, blbb, B,
+                                         rx, roff, rlen, rlw, rrad, R)
+                        if nt <= 0:
+                            continue
+                        kfin = k2 + nt
+                        kmax = kfin if kfin > res_maxlen else res_maxlen
+                        if not _k_aparca(pt[nt - 1, 0], pt[nt - 1, 1],
+                                         pt[nt - 1, 2], kfin, kmax, Ld, Wd,
+                                         rx, roff, rlen, rlw, rrad, R,
+                                         diag, mdin):
+                            continue
+                        total = n1 + n2 + nt
+                        if total < best_total:
+                            best_total = total
+                            m = 0
+                            for q in range(n1):
+                                out[m, 0] = seg1[q, 0]; out[m, 1] = seg1[q, 1]
+                                out[m, 2] = seg1[q, 2]; m += 1
+                            for q in range(n2):
+                                out[m, 0] = seg2[q, 0]; out[m, 1] = seg2[q, 1]
+                                out[m, 2] = seg2[q, 2]; m += 1
+                            for q in range(nt):
+                                out[m, 0] = pt[q, 0]; out[m, 1] = pt[q, 1]
+                                out[m, 2] = pt[q, 2]; m += 1
+                            best_n = m
     return best_n, out
 
 
@@ -1033,14 +1217,23 @@ class Planificador:
         # lateral (A_LAT_MAX), así que subirlo no empeora los giros; solo hace
         # las rutas algo menos óptimas (un poco más largas), cosa asumible.
         tabla = {
-            # nivel: (n_dir, ang_res, peso_h, max_nodos, rel_ini, rel_span, ang_tol_max)
-            1: (17, 12, 1.70,  800000,  8000,  40000, 0.56),
-            2: (23, 11, 1.50, 1100000, 12000,  80000, 0.46),
-            3: (31, 10, 1.35, 1600000, 15000, 120000, 0.36),
-            4: (41,  8, 1.20, 2400000, 25000, 200000, 0.28),
-            5: (55,  6, 1.08, 3600000, 40000, 350000, 0.12),
+            # nivel: (n_dir, ang_res, peso_h, max_nodos, rel_ini, rel_span,
+            #         ang_tol_max, rel_ini_g, rel_span1_g, rel_span2_g,
+            #         plazo_mejora_g)
+            # rel_span1_g: expansiones-en-meta para pasar de ang_tol a
+            # ang_tol_max (etapa 1, "casi bien encarada"). rel_span2_g: las
+            # que hacen falta ADEMÁS para llegar de ahí a ángulo LIBRE (etapa
+            # 2). En calidad 5, rel_span2_g es enorme a propósito: la etapa 1
+            # sigue siendo el techo práctico y la 2 solo se alcanza en un caso
+            # verdaderamente patológico (no imposible, pero rarísimo).
+            1: (17, 12, 1.70,  800000,  8000,  40000, 0.56,  15000, 126_000,     84_000,  6_000),
+            2: (23, 11, 1.50, 1100000, 12000,  80000, 0.46,  17500, 147_000,     98_000,  7_000),
+            3: (31, 10, 1.35, 1600000, 15000, 120000, 0.36,  20000, 168_000,    112_000,  8_000),
+            4: (41,  8, 1.20, 2400000, 25000, 200000, 0.28,  25000, 210_000,    140_000, 10_000),
+            5: (55,  6, 1.08, 3600000, 40000, 350000, 0.12,  30000, 252_000,  2_000_000, 12_000),
         }
-        n_dir, ang, peso, mx, r_ini, r_span, a_max = tabla.get(int(nivel), tabla[3])
+        (n_dir, ang, peso, mx, r_ini, r_span, a_max, r_ini_g, r_span1_g,
+         r_span2_g, plazo_mejora_g) = tabla.get(int(nivel), tabla[3])
         half = n_dir // 2
         fracs = [0.0]
         for i in range(1, half + 1):
@@ -1053,14 +1246,37 @@ class Planificador:
         self.rel_ini = r_ini
         self.rel_span = r_span
         self.ang_tol_max = a_max
+        # Relajación del ángulo por esfuerzo EN ZONA DE META (expansiones con
+        # d_goal ≤ dist_tiro, NADA de tiempo): sin relajar hasta rel_ini_g;
+        # etapa 1 (hasta ang_tol_max) dura rel_span1_g expansiones más; etapa
+        # 2 (hasta ángulo libre) rel_span2_g expansiones más todavía.
+        self.rel_ini_g = r_ini_g
+        self.rel_span1_g = r_span1_g
+        self.rel_span2_g = r_span2_g
+        # Presupuesto de MEJORA del ángulo (búsqueda anytime), en EXPANSIONES
+        # sin mejorar (no segundos): tras hallar una llegada solo válida por
+        # relajación, cuántos nodos más se exploran buscando una mejor
+        # encarada antes de conformarse con la candidata.
+        self.plazo_mejora = plazo_mejora_g
 
 
     def _clave(self, x, y, th, v, k):
-        ix = int(x / self.res_pos)
-        iy = int(y / self.res_pos)
-        ith = int((th % (2 * math.pi)) / self.res_ang)
-        iv = int(round(v / self.res_v)) & 0xFF
-        return (ix << 36) | (iy << 28) | (ith << 20) | (iv << 14) | k
+        # Campos de 8 bits SIN SOLAPE (ix|iy|ith|iv|k). La velocidad se desplaza
+        # +64 antes de enmascarar: con marcha atrás v es NEGATIVA y el antiguo
+        # `int(...) & 0xFF` producía 250-255, que invadía los bits de la
+        # orientación → estados de retroceso aliasados con rumbos distintos y
+        # podados como dominados (la búsqueda "agotaba" espacio que en realidad
+        # no había explorado).
+        ix = int(x / self.res_pos) & 0xFF
+        iy = int(y / self.res_pos) & 0xFF
+        ith = int((th % (2 * math.pi)) / self.res_ang) & 0xFF
+        iv = (int(round(v / self.res_v)) + 64) & 0xFF
+        # NOTA: k entra ENTERO en la clave (sin saturarlo aunque el mundo quede
+        # estático). Se probó saturarlo para podar entre rebanadas temporales y
+        # produce falsos "sin_ruta": al quedar fijada la primera pose continua
+        # que entra en cada celda, un vehículo grande en pasillos estrechos no
+        # puede refinar la pose en visitas posteriores y la frontera se agota.
+        return (ix << 38) | (iy << 30) | (ith << 22) | (iv << 14) | k
 
     # ------------------- empaquetado para los kernels -------------------- #
     def _pack_bloqueos(self):
@@ -1274,18 +1490,83 @@ class Planificador:
         expand = 0
         self._exp_ult_maniobra = 0
         self._last_tick = time.perf_counter()
+        exp_goal = 0                      # expansiones DENTRO de la zona de meta
         self.motivo = "limite"
         self.relajado = False
+
+        # BÚSQUEDA "ANYTIME" con DOS niveles de candidata (ambas se van
+        # afinando y solo cierran la búsqueda como último recurso, tras
+        # 'plazo_mejora' expansiones SIN mejorar, o al agotar plazo/nodos):
+        #
+        #  · mejor_traj — llegada PRECISA (el conector _k_tiro paró en la meta,
+        #    a goal_tol_fin) pero con el ángulo solo válido por RELAJACIÓN. Una
+        #    llegada precisa Y con el ángulo exacto se devuelve al instante; una
+        #    relajada se guarda y se sigue buscando un ángulo mejor.
+        #
+        #  · backup_traj — parada de RESPALDO dentro de la tolerancia GRUESA
+        #    (goal_tol, hasta 1.6 m de la meta). ANTES esto cerraba la búsqueda
+        #    de inmediato → el vehículo se detenía a más de un metro del punto
+        #    final «sin sentido». Ahora es solo una red de seguridad: se guarda
+        #    la parada más CERCANA a la meta, pero la búsqueda sigue intentando
+        #    una llegada precisa con _k_tiro; el respaldo únicamente se usa si
+        #    no aparece nada mejor. mejor_traj (precisa) siempre gana al backup.
+        mejor_traj = None
+        mejor_err = 1e18
+        backup_traj = None
+        backup_d = 1e18
+        expand_cand = 0                   # última expansión que MEJORÓ algo
+
+        def _acepta(traj):
+            """Llegada PRECISA (vía _k_tiro/maniobra). Ángulo exacto → cierra al
+            instante; ángulo relajado → candidata (devuelve None y sigue)."""
+            nonlocal mejor_traj, mejor_err, expand_cand
+            if not con_ang:
+                self.motivo = "ok"
+                self.relajado = False
+                return traj
+            err = abs(ang_norm(traj[-1][2] - gth))
+            if err <= ang_tol * 1.01:
+                self.motivo = "ok"
+                self.relajado = False
+                return traj
+            if err < mejor_err:
+                mejor_traj = traj
+                mejor_err = err
+                expand_cand = expand
+            return None
+
+        def _cerrar_fallback():
+            """Devuelve la mejor llegada disponible: la precisa (relajada de
+            ángulo) si la hay, y si no la parada de respaldo más cercana."""
+            if mejor_traj is not None:
+                self.motivo = "ok"
+                self.relajado = True
+                return mejor_traj
+            if backup_traj is not None:
+                self.motivo = "ok"
+                self.relajado = True
+                return backup_traj
+            return None
 
         while abierto and expand < self.max_exp and nid < self.max_nodos:
             _f, cid, x, y, th, v, k, g = heapq.heappop(abierto)
             expand += 1
+
+            # Cierre por ESTANCAMIENTO: hay candidata (precisa o de respaldo) y
+            # llevamos 'plazo_mejora' expansiones sin acercarnos más ni mejorar
+            # el ángulo → nos quedamos con la mejor hallada.
+            if ((mejor_traj is not None or backup_traj is not None)
+                    and expand - expand_cand > self.plazo_mejora):
+                return _cerrar_fallback()
 
             if (expand & 255) == 0:
                 self.expandidos = expand
                 self.nodos = nid
                 now = time.perf_counter()
                 if self.deadline is not None and now > self.deadline:
+                    fb = _cerrar_fallback()
+                    if fb is not None:
+                        return fb
                     self.motivo = "limite"
                     return None
                 if self.tick is not None and now - self._last_tick > 0.01:
@@ -1293,38 +1574,63 @@ class Planificador:
                     self.tick(expand)
 
             d_goal = math.hypot(x - gx, y - gy)
+            if d_goal <= self.dist_tiro:
+                exp_goal += 1
 
-            # RELAJACIÓN PROGRESIVA DEL ÁNGULO DE LLEGADA. El caso que agota los
-            # nodos es un vehículo que no logra encajar la orientación exacta y
-            # sigue buscando hasta el techo, quedándose SIN RUTA. Prioridad del
-            # usuario: llegar SIEMPRE > llegar con el ángulo exacto. Así que la
-            # tolerancia del ángulo se ensancha con los nodos creados: exacta al
-            # principio (se respeta cuando es alcanzable), y hacia "cualquier
-            # orientación" a medida que se acerca al techo, de modo que el coche
-            # ACABA LLEGANDO (al peor ángulo, pero llega) antes de agotarlo.
+            # RELAJACIÓN PROGRESIVA DEL ÁNGULO DE LLEGADA (red de seguridad en
+            # DOS ETAPAS: primero hasta el tope del nivel —llegadas "casi bien
+            # encaradas"— y, si ni así aparece solución, hasta ángulo LIBRE).
+            # Prioridad del usuario: llegar SIEMPRE (y pronto) > llegar con el
+            # ángulo exacto. El avance se mide SOLO por EXPANSIONES DENTRO DE
+            # LA ZONA DE LA META (d_goal ≤ dist_tiro), sin relojes de tiempo:
+            # así una ruta larga no llega con la tolerancia ya regalada solo
+            # por el viaje, y el resultado no depende de la velocidad de la
+            # máquina.
             if con_ang:
-                # La relajación es una RED DE SEGURIDAD tardía: no toca nada hasta
-                # REL_INI nodos (así se respeta el ángulo EXACTO cuando es
-                # alcanzable, la mayoría de los casos) y, si el vehículo sigue sin
-                # lograrlo, ensancha la tolerancia hasta aceptar cualquier
-                # orientación, para que ACABE LLEGANDO en un tiempo acotado en vez
-                # de buscar el ángulo exacto indefinidamente. Umbral ABSOLUTO (no
-                # ligado al techo de memoria), para que el tiempo sea el mismo en
-                # localhost y en Render.
-                fr = (nid - self.rel_ini) / self.rel_span
-                if fr < 0.0:
-                    fr = 0.0
-                elif fr > 1.0:
-                    fr = 1.0
-                # Máximo de relajación acotado por nivel (self.ang_tol_max) para que
-                # si no encuentra solución con tolerancia fina, sea algo más
-                # permisivo pero NUNCA llegue a desviarse mucho de la orientación ideal.
+                # Etapa 1 (hasta ang_tol_max) y etapa 2 (hasta ángulo libre),
+                # cada una con su propio presupuesto de expansiones-en-meta.
+                fr1 = (exp_goal - self.rel_ini_g) / self.rel_span1_g
+                if fr1 < 0.0:
+                    fr1 = 0.0
+                elif fr1 > 1.0:
+                    fr1 = 1.0
+                stage1_end = self.rel_ini_g + self.rel_span1_g
+                fr2 = (exp_goal - stage1_end) / self.rel_span2_g
+                if fr2 < 0.0:
+                    fr2 = 0.0
+                elif fr2 > 1.0:
+                    fr2 = 1.0
                 max_tol = max(ang_tol, self.ang_tol_max)
-                ang_tol_din = ang_tol + (max_tol - ang_tol) * fr
+                ang_tol_din = (ang_tol + (max_tol - ang_tol) * fr1
+                               + (math.pi - max_tol) * fr2)
+                fr = 0.6 * fr1 + 0.4 * fr2   # progreso combinado (para el peso)
+                if mejor_traj is not None:
+                    # Ya hay llegada candidata: solo interesan llegadas
+                    # CLARAMENTE mejores (85% de su error, sin bajar de la
+                    # tolerancia original).
+                    tol_mejora = 0.85 * mejor_err
+                    if tol_mejora < ang_tol:
+                        tol_mejora = ang_tol
+                    if ang_tol_din > tol_mejora:
+                        ang_tol_din = tol_mejora
                 con_ang_din = 1
+                # PESO del heurístico: se sube con el avance en NODOS (nid vs
+                # rel_ini/rel_span) para que los tránsitos difíciles por calles
+                # estrechas carguen hacia la meta en vez de barrer en anchura.
+                # En fase de relajación la optimalidad ya está sacrificada;
+                # esto solo acorta la espera.
+                fr_p = (nid - self.rel_ini) / self.rel_span
+                if fr_p < 0.0:
+                    fr_p = 0.0
+                elif fr_p > 1.0:
+                    fr_p = 1.0
+                if fr > fr_p:
+                    fr_p = fr
+                peso_din = self.peso_h * (1.0 + 0.35 * fr_p)
             else:
                 ang_tol_din = ang_tol
                 con_ang_din = 0
+                peso_din = self.peso_h
 
             if d_goal <= self.dist_tiro:
                 # Se intenta PRIMERO conducir hasta el punto exacto (tolerancia
@@ -1359,14 +1665,20 @@ class Planificador:
                                      rx, roff, rlen, rlw, rrad, R, self.diag, self.margen_din):
                             base = self._reconstruir(padre_id, arista_id, cid,
                                                      (sx, sy, sth))
-                            self.motivo = "ok"
-                            self.relajado = con_ang == 1 and ang_tol_din > ang_tol * 1.01
-                            return base + tiro
+                            res = _acepta(base + tiro)
+                            if res is not None:
+                                return res
 
-            # Respaldo: ya está dentro de la tolerancia gruesa y casi parado (el
-            # remate no aportó o no era viable) → acepta aquí si la plaza queda
-            # libre y, con ángulo de llegada exigido, si la orientación cuadra.
-            if d_goal <= self.goal_tol and abs(v) <= self.v_tol:
+            # Respaldo (RED DE SEGURIDAD, no cierre): nodo dentro de la
+            # tolerancia gruesa y casi parado. Si el remate _k_tiro no logró
+            # llegar al punto exacto, esta parada aproximada se GUARDA como
+            # candidata de último recurso —la más cercana a la meta— pero la
+            # búsqueda NO se detiene: sigue intentando una llegada precisa. Así
+            # el vehículo ya no se queda quieto a más de un metro del destino
+            # «sin sentido»; solo caería en el respaldo si de verdad no existe
+            # forma de rematar en el punto exacto dentro del presupuesto.
+            if (d_goal <= self.goal_tol and abs(v) <= self.v_tol
+                    and d_goal < backup_d):
                 ang_ok = True
                 if con_ang_din:
                     ang_ok = abs(ang_norm(th - gth)) <= 1.5 * ang_tol_din
@@ -1376,36 +1688,54 @@ class Planificador:
                     kfin = k if k > res_maxlen else res_maxlen
                     if _k_aparca(x, y, th, k, kfin, Ld, Wd,
                                  rx, roff, rlen, rlw, rrad, R, self.diag, self.margen_din):
-                        self.motivo = "ok"
-                        self.relajado = con_ang == 1 and ang_tol_din > ang_tol * 1.01
-                        return self._reconstruir(padre_id, arista_id, cid, (sx, sy, sth))
+                        backup_traj = self._reconstruir(padre_id, arista_id, cid,
+                                                        (sx, sy, sth))
+                        backup_d = d_goal
+                        expand_cand = expand      # progreso: respaldo más cercano
 
             # Conector REVERSIBLE (adelante-y-atrás para cuadrar el ángulo): solo
             # cuando la búsqueda ya se atasca con el ángulo de llegada exigido y el
             # coche está cerca de la meta. Se prueba de forma espaciada para no
             # encarecer el caso normal. Si encuentra maniobra, cierra la ruta.
-            # EXIGE abs(v) <= v_tol: la maniobra arranca asumiendo el vehículo
-            # PARADO (vmag=0); sin esta comprobación se podía disparar con el
-            # coche aún circulando y la ruta resultante "saltaba" de ir a
-            # velocidad v a frenar en seco para la marcha atrás, sin un tramo de
-            # frenada real entre medias (físicamente imposible).
-            if (con_ang_din and d_goal <= self.dist_tiro and abs(v) <= self.v_tol
+            #
+            # Se le pasa la velocidad ACTUAL 'v': la rama HACIA DELANTE la arrastra
+            # (enlaza el tramo de reorientación con el remate SIN parar), así que la
+            # maniobra puede dispararse con el coche AÚN CIRCULANDO y ya no obliga a
+            # frenar hasta 0 «sin sentido» antes de seguir de frente. Solo la rama
+            # de MARCHA ATRÁS exige partir parado, y de eso se encarga la propia
+            # _k_maniobra (descarta el retroceso si |v0| > v_tol).
+            if (con_ang_din and d_goal <= self.dist_tiro
                     and expand > self.umbral_maniobra
                     and expand - self._exp_ult_maniobra >= self.paso_maniobra):
                 self._exp_ult_maniobra = expand
-                nm, pm = _k_maniobra(x, y, th, k, gx, gy, gth, ang_tol_din,
+                nm, pm = _k_maniobra(x, y, th, v, k, gx, gy, gth, ang_tol_din,
                                      L, dmax, self.ld_tiro, self.v_max_c, self.a_max,
                                      self.goal_tol_fin, self.v_tol, h,
                                      self._len, self._wid, self.margen, self.margen_din,
                                      self.diag, W, H, oc, oax, obb, K,
                                      blc, blax, blbb, B, rx, roff, rlen, rlw, rrad, R,
                                      res_maxlen)
+                if nm <= 0 and abs(v) <= self.v_tol:
+                    # La maniobra de UNA fase no basta (p. ej. vehículo 'pasado'
+                    # de su plaza que necesita un cambio de sentido doble): se
+                    # intenta la de DOS fases (inversión doble → arranca PARADA,
+                    # por eso solo si el coche ya llega casi detenido) antes de
+                    # seguir quemando nodos.
+                    nm, pm = _k_maniobra2(x, y, th, k, gx, gy, gth, ang_tol_din,
+                                          L, dmax, self.ld_tiro, self.v_max_c,
+                                          self.a_max, self.goal_tol_fin,
+                                          self.v_tol, h, self._len, self._wid,
+                                          self.margen, self.margen_din,
+                                          self.diag, W, H, oc, oax, obb, K,
+                                          blc, blax, blbb, B,
+                                          rx, roff, rlen, rlw, rrad, R,
+                                          res_maxlen)
                 if nm > 0:
                     maniobra = [(pm[i, 0], pm[i, 1], pm[i, 2]) for i in range(nm)]
                     base = self._reconstruir(padre_id, arista_id, cid, (sx, sy, sth))
-                    self.motivo = "ok"
-                    self.relajado = con_ang == 1 and ang_tol_din > ang_tol * 1.01
-                    return base + maniobra
+                    res = _acepta(base + maniobra)
+                    if res is not None:
+                        return res
 
             if k >= self.k_max:
                 continue
@@ -1469,12 +1799,17 @@ class Planificador:
                             err_th = abs(ang_norm(nth - gth))
                             hh += (0.35 * err_app + 0.25 * err_th) * (self._len / self.v_max_c)
                     heapq.heappush(abierto,
-                                   (ng + self.peso_h * hh, nid, nx, ny, nth, nv, nk, ng))
+                                   (ng + peso_din * hh, nid, nx, ny, nth, nv, nk, ng))
 
-        # Frontera vacía → no existe ruta (definitivo). Si quedaban nodos, se
-        # alcanzó el techo de nodos/expansiones → resultado inconcluso.
+        # Búsqueda agotada: si hay alguna candidata (precisa relajada o parada
+        # de respaldo), vale la mejor de ellas.
         self.expandidos = expand
         self.nodos = nid
+        fb = _cerrar_fallback()
+        if fb is not None:
+            return fb
+        # Frontera vacía → no existe ruta (definitivo). Si quedaban nodos, se
+        # alcanzó el techo de nodos/expansiones → resultado inconcluso.
         if not abierto:
             self.motivo = "sin_ruta"          # sin salida: algo lo bloquea
         elif nid >= self.max_nodos:
@@ -1515,10 +1850,14 @@ def warmup():
             1.3, 0.7, 0.1, 0.15, 1.48, W, H, oc, oax, obb, 1,
             eb, eb, ebb, 0, rx, roff, rlen, rlw, rrad, 1)
     _k_aparca(2.0, 2.0, 0.0, 0, 1, 1.6, 1.0, rx, roff, rlen, rlw, rrad, 1, 1.48, 0.15)
-    _k_maniobra(2.0, 2.0, 0.0, 0, 6.0, 6.0, 0.0, 0.2,
+    _k_maniobra(2.0, 2.0, 0.0, 0.0, 0, 6.0, 6.0, 0.0, 0.2,
                 0.7, 0.6, 2.0, 2.5, 1.0, 0.2, 0.45, 0.1,
                 1.3, 0.7, 0.1, 0.15, 1.48, W, H, oc, oax, obb, 1,
                 eb, eb, ebb, 0, rx, roff, rlen, rlw, rrad, 1, 1)
+    _k_maniobra2(2.0, 2.0, 0.0, 0, 6.0, 6.0, 0.0, 0.2,
+                 0.7, 0.6, 2.0, 2.5, 1.0, 0.2, 0.45, 0.1,
+                 1.3, 0.7, 0.1, 0.15, 1.48, W, H, oc, oax, obb, 1,
+                 eb, eb, ebb, 0, rx, roff, rlen, rlw, rrad, 1, 1)
     _k_occ(4, 4, 0.5, 0.45, W, H, oc, oax, obb, 1)
 
 
@@ -1612,9 +1951,25 @@ def generar_ordenes(vehiculos, indices, modo, max_cand=24):
     return ordenes
 
 
-def bloqueos_metas(vehiculos, indices, excepto):
+def bloqueos_metas(vehiculos, indices, excepto, pose0=None):
     """OBB cuadrados en las metas ajenas, para que nadie planifique aparcar
-    donde otro vehículo debe aparcar."""
+    donde otro vehículo debe aparcar.
+
+    'pose0' es la pose INICIAL (x, y, th) del vehículo que va a planificar: un
+    bloqueo que solape esa pose se OMITE. Sin esto, un vehículo que arranca
+    pegado a la meta de otro queda atrapado dentro de un obstáculo invisible
+    (todas sus acciones 'colisionan' desde el primer nodo) y la búsqueda
+    devuelve 'sin_ruta' al instante aunque tenga espacio de sobra. La
+    protección real de la plaza ajena la siguen dando las reservas dinámicas
+    del otro vehículo y la comprobación de aparcamiento (_k_aparca)."""
+    veh0 = vehiculos[excepto] if excepto is not None else None
+    cA = aA = None
+    if pose0 is not None and veh0 is not None:
+        # OBB del vehículo en su pose inicial, con el mismo inflado (margen)
+        # que usará la búsqueda al validar contra los bloqueos.
+        cA = _k_corners(pose0[0], pose0[1], pose0[2],
+                        veh0.length + 0.30, veh0.width + 0.30)
+        aA = _k_axes(cA)
     bloq = []
     for j in indices:
         if j == excepto:
@@ -1622,6 +1977,11 @@ def bloqueos_metas(vehiculos, indices, excepto):
         veh = vehiculos[j]
         mx, my = veh.meta
         poly = obb_corners(mx, my, 0.0, veh.diag, veh.diag)
+        if cA is not None:
+            cB = np.array(poly)
+            aB = _k_axes(cB)
+            if _k_sat(cA, aA, cB, aB):
+                continue                # atraparía al vehículo en su inicio
         bloq.append((poly, (mx, my, veh.diag / 2)))
     return bloq
 
@@ -1653,10 +2013,12 @@ def planificar_orden(planificador, vehiculos, orden, reservas_base,
         veh = vehiculos[idx]
         if tick_veh is not None:
             tick_veh(pos, idx)
-        planificador.bloqueos = bloqueos_metas(vehiculos, orden, excepto=idx)
+        ini = inicios.get(idx) if inicios else None
+        planificador.bloqueos = bloqueos_metas(
+            vehiculos, orden, excepto=idx,
+            pose0=(ini if ini is not None else veh.inicio))
         if deadline_dur is not None:
             planificador.deadline = time.perf_counter() + deadline_dur
-        ini = inicios.get(idx) if inicios else None
         traj = planificador.planificar(veh, reservas, inicio=ini)
         motivos[idx] = planificador.motivo
         if traj is not None and len(traj) >= 2:
@@ -1718,7 +2080,6 @@ def _wk_eval(args):
     cola = _WK["cola"]
     wid = _WK["wid"]
     pl.max_exp = max_exp
-    pl.deadline = time.perf_counter() + deadline_dur
 
     def tick(expand):
         ahora = time.perf_counter()
@@ -1731,8 +2092,12 @@ def _wk_eval(args):
 
     pl.tick = tick
     try:
+        # 'deadline_dur' es POR VEHÍCULO (planificar_orden lo renueva al empezar
+        # cada uno): antes se fijaba aquí un único plazo para el orden entero y
+        # los primeros vehículos agotaban el tiempo de los últimos.
         trays, motivos, coste = planificar_orden(
-            pl, _WK["vehiculos"], orden, _WK["reservas"], inicios=_WK["inicios"])
+            pl, _WK["vehiculos"], orden, _WK["reservas"], inicios=_WK["inicios"],
+            deadline_dur=deadline_dur)
     finally:
         pl.tick = None
     fallos = sum(1 for i in orden if trays[i] is None)
@@ -1935,6 +2300,18 @@ def construir_frames(vehiculos):
 # Interfaz gráfica
 # --------------------------------------------------------------------------- #
 CAP_COMPLETO = 6_000_000     # techo de expansiones para agotar la búsqueda
+
+# Plazos POR VEHÍCULO (se renuevan al empezar cada vehículo, vía deadline_dur):
+# acotan el tiempo del caso difícil para que ningún vehículo cuelgue la
+# aplicación minutos enteros, sin que los primeros del orden puedan comerse el
+# presupuesto de los últimos (el bug que describe el docstring de
+# planificar_orden).
+PLAZO_VEH_CAND = 5.0         # s/vehículo al COMPARAR órdenes candidatos
+#                              (fase de exploración de órdenes, interactividad
+#                              de la UI; no participa en la decisión de
+#                              relajar el ángulo ni en la de rendirse, que son
+#                              puramente por NODOS: max_exp/max_nodos y los
+#                              umbrales de relajación en configurar_calidad).
 
 
 class App:
@@ -2460,9 +2837,9 @@ class App:
             hecho_paralelo = False
             if explorar and nucleos_disponibles() >= 2 and n >= 3:
                 try:
-                    dur = max(10.0, 3.0 * n)
                     mejor = self._evaluar_ordenes_paralelo(
-                        ordenes, reservas_base, inicios, cap_prev, dur)
+                        ordenes, reservas_base, inicios, cap_prev,
+                        PLAZO_VEH_CAND)
                     hecho_paralelo = True
                     if mejor is None:            # ventana cerrada durante el cálculo
                         return {}, {}
@@ -2485,17 +2862,23 @@ class App:
                         self.root.update()
 
                     if explorar:
-                        # Presupuesto por candidato: cap de calidad + límite
-                        # temporal, para que explorar muchos órdenes siga siendo
-                        # interactivo.
+                        # Presupuesto por candidato: cap de calidad + plazo POR
+                        # VEHÍCULO, para que explorar muchos órdenes siga siendo
+                        # interactivo y ningún vehículo se coma el plazo ajeno.
                         pl.max_exp = cap_prev
-                        pl.deadline = time.perf_counter() + max(10.0, 3.0 * n)
+                        dur_veh = PLAZO_VEH_CAND
                     else:
+                        # Orden DEFINITIVO: sin plazo de tiempo, solo nodos
+                        # (cap_completo). El "cuándo se rinde" es max_exp/
+                        # max_nodos y la relajación del ángulo por nodos-en-
+                        # meta; nada de segundos aquí.
                         pl.max_exp = CAP_COMPLETO
                         pl.deadline = None
+                        dur_veh = None
                     trays, motivos, coste = planificar_orden(
                         pl, self.vehiculos, orden, reservas_base,
-                        inicios=inicios, tick_veh=tick_veh)
+                        inicios=inicios, tick_veh=tick_veh,
+                        deadline_dur=dur_veh)
                     fallos = sum(1 for i in orden if trays[i] is None)
                     if mejor is None or (fallos, coste) < (mejor[0], mejor[1]):
                         mejor = (fallos, coste, trays, motivos, orden)
@@ -2505,8 +2888,8 @@ class App:
             fallos, _, trays, motivos, orden = mejor
             # ---- rescate de los vehículos sin ruta en el mejor orden ---- #
             if fallos:
-                pl.deadline = None
                 pl.max_exp = CAP_COMPLETO
+                pl.deadline = None            # solo nodos, nada de segundos
                 reservas = reservas_base.copia()
                 for i in orden:
                     if trays[i] is not None:
@@ -2520,8 +2903,11 @@ class App:
                                       "(búsqueda exhaustiva)")
                     self.estado.set(self._plan_msg + "…")
                     self.root.update()
-                    pl.bloqueos = bloqueos_metas(self.vehiculos, orden, excepto=i)
                     ini = inicios.get(i) if inicios else None
+                    pl.bloqueos = bloqueos_metas(
+                        self.vehiculos, orden, excepto=i,
+                        pose0=(ini if ini is not None else veh.inicio))
+                    pl.deadline = None            # solo nodos
                     traj = pl.planificar(veh, reservas, inicio=ini)
                     motivos[i] = pl.motivo
                     intentos = 0
@@ -2529,7 +2915,9 @@ class App:
                            and inicios is None and intentos < 12):
                         if not self._reubicar(veh):
                             break
-                        pl.bloqueos = bloqueos_metas(self.vehiculos, orden, excepto=i)
+                        pl.bloqueos = bloqueos_metas(self.vehiculos, orden,
+                                                     excepto=i, pose0=veh.inicio)
+                        pl.deadline = None            # solo nodos
                         traj = pl.planificar(veh, reservas)
                         motivos[i] = pl.motivo
                         intentos += 1
