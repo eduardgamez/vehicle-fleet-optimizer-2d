@@ -1768,6 +1768,27 @@ class Planificador:
                     ng += 0.6 * self.dt               # marcha atrás: maniobra indeseada
                 if abs(nv) < 1e-3 and acc[ai] <= 0.0:
                     ng += 0.20 * self.dt              # pararse sin motivo cuesta tiempo
+                # ε: no PARARSE «sin sentido» en la zona de la meta. El
+                # heurístico (tiempo-a-meta) tiene un POZO sobre el punto final
+                # (h≈0), y con A* ponderado eso ATRAE a los nodos casi PARADOS
+                # —enseguida enlazan un remate o una maniobra—, de modo que la
+                # ruta se frena HASTA DETENERSE aunque LUEGO siga hacia ADELANTE,
+                # donde parar no aporta nada. El punto fino: NINGÚN conector
+                # necesita v<v_tol. El remate y la maniobra HACIA DELANTE
+                # arrastran la velocidad de entrada (no paran); la maniobra de
+                # MARCHA ATRÁS solo exige entrar con |v|≤v_tol y es ella misma la
+                # que pasa por v=0 para invertir el sentido. Por tanto un parón
+                # total (v≈0) en la BÚSQUEDA es siempre un artefacto del pozo del
+                # heurístico. Se encarece con firmeza bajar de v_tol cerca de la
+                # meta (sin mirar la curvatura: un parón no lo justifica ninguna
+                # curva, solo un cambio de sentido, que va por su conector): así
+                # la búsqueda llega «reduciendo la velocidad» hasta ~v_tol en vez
+                # de PARANDO, y el coche solo se detiene de verdad cuando de
+                # verdad va a ir marcha atrás (lo decide el conector, no el A*).
+                if con_ang and abs(nv) < self.v_tol:
+                    d_goal_next = math.hypot(nx - gx, ny - gy)
+                    if d_goal_next <= self.dist_tiro:
+                        ng += 3.0 * self.dt * (self.v_tol - abs(nv)) / self.v_tol
                 ng += 0.10 * self.dt * abs(delta) / dmax          # ε: prefiere ir recto
                 # ε: sin temblor de volante. Reforzado: mantener el MISMO ángulo
                 # de dirección a lo largo de la curva sale mucho más barato que
