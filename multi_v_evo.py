@@ -1143,13 +1143,13 @@ class Planificador:
         self.res_v = 0.5
         self.dt = 0.4
         self.subpasos = 4
-        self.goal_tol = 1.6           # tolerancia GRUESA: dispara/acepta el remate
+        self.goal_tol = 1.6           # tolerancia GRUESA: por defecto; se ajusta en planificar al lado corto del vehículo
         self.goal_tol_fin = 0.20      # tolerancia FINA: el piloto conduce hasta aquí
         #                              (para no quedarse parado a un paso de la meta)
         self.v_tol = 0.45
-        self.ang_tol_meta = math.radians(10)   # tolerancia del ÁNGULO DE LLEGADA
+        self.ang_tol_meta = math.radians(5)    # tolerancia del ÁNGULO DE LLEGADA
         self.k_max = 1600
-        self.dist_tiro = 10.0
+        self.dist_tiro = 10.0         # por defecto; se ajusta en planificar al doble del lado mayor del vehículo
         self.ang_tiro = math.radians(30)
         self.ld_tiro = 1.6            # lookahead del remate: acerca el conector al
         #                              óptimo tipo Dubins (arco al radio necesario +
@@ -1226,11 +1226,11 @@ class Planificador:
             # 2). En calidad 5, rel_span2_g es enorme a propósito: la etapa 1
             # sigue siendo el techo práctico y la 2 solo se alcanza en un caso
             # verdaderamente patológico (no imposible, pero rarísimo).
-            1: (17, 12, 1.70,  800000,  8000,  40000, 0.56,  15000, 126_000,     84_000,  6_000),
-            2: (23, 11, 1.50, 1100000, 12000,  80000, 0.46,  17500, 147_000,     98_000,  7_000),
-            3: (31, 10, 1.35, 1600000, 15000, 120000, 0.36,  20000, 168_000,    112_000,  8_000),
-            4: (41,  8, 1.20, 2400000, 25000, 200000, 0.28,  25000, 210_000,    140_000, 10_000),
-            5: (55,  6, 1.08, 3600000, 40000, 350000, 0.12,  30000, 252_000,  2_000_000, 12_000),
+            1: (17, 12, 1.70, 1200000,  8000,  40000, 0.56, 120_000, 189_000,    189_000,  30_000),
+            2: (23, 11, 1.50, 1650000, 12000,  80000, 0.46, 140_000, 220_500,    220_500,  35_000),
+            3: (31, 10, 1.35, 2400000, 15000, 120000, 0.36, 160_000, 252_000,    252_000,  40_000),
+            4: (41,  8, 1.20, 3600000, 25000, 200000, 0.28, 200_000, 315_000,    315_000,  50_000),
+            5: (55,  6, 1.08, 5400000, 40000, 350000, 0.12, 500_000, 500_000,  2_500_000, 120_000),
         }
         (n_dir, ang, peso, mx, r_ini, r_span, a_max, r_ini_g, r_span1_g,
          r_span2_g, plazo_mejora_g) = tabla.get(int(nivel), tabla[3])
@@ -1243,6 +1243,8 @@ class Planificador:
         self.res_ang = math.radians(ang)
         self.peso_h = peso
         self.max_exp = mx
+        if mx * 2 > self.max_nodos:
+            self.max_nodos = mx * 2
         self.rel_ini = r_ini
         self.rel_span = r_span
         self.ang_tol_max = a_max
@@ -1434,6 +1436,8 @@ class Planificador:
         Si veh.meta_th no es None, la llegada solo se acepta con la orientación
         final dentro de ang_tol_meta alrededor de ese ángulo."""
         self._len, self._wid = veh.length, veh.width
+        self.goal_tol = min(veh.length, veh.width)
+        self.dist_tiro = 2.0 * max(veh.length, veh.width)
         self.diag = veh.diag
         L = veh.wheelbase
         dmax = veh.delta_max
