@@ -182,27 +182,29 @@ document.addEventListener('DOMContentLoaded', () => {
 
       // Flecha de ángulo de llegada si existe
       if (v.meta_th !== null && v.meta_th !== undefined) {
-        const ax = mx + 0.5 * Math.cos(v.meta_th);
-        const ay = my + 0.5 * Math.sin(v.meta_th);
+        const ax = mx + 0.3 * Math.cos(v.meta_th);
+        const ay = my + 0.3 * Math.sin(v.meta_th);
+        const axpx = ax * scale + offsetX;
+        const aypx = ay * scale + offsetY;
         ctx.strokeStyle = color;
-        ctx.lineWidth = 1.5;
+        ctx.lineWidth = 1.2;
         ctx.beginPath();
         ctx.moveTo(mx * scale + offsetX, my * scale + offsetY);
-        ctx.lineTo(ax * scale + offsetX, ay * scale + offsetY);
+        ctx.lineTo(axpx, aypx);
         ctx.stroke();
 
-        const headlen = 3;
+        const headlen = 2;
         const angle = v.meta_th;
         ctx.beginPath();
-        ctx.moveTo(ax * scale + offsetX, ay * scale + offsetY);
+        ctx.moveTo(axpx, aypx);
         ctx.lineTo(
-          (ax * scale + offsetX) - headlen * Math.cos(angle - Math.PI / 6),
-          (ay * scale + offsetX) - headlen * Math.sin(angle - Math.PI / 6)
+          axpx - headlen * Math.cos(angle - Math.PI / 6),
+          aypx - headlen * Math.sin(angle - Math.PI / 6)
         );
-        ctx.moveTo(ax * scale + offsetX, ay * scale + offsetY);
+        ctx.moveTo(axpx, aypx);
         ctx.lineTo(
-          (ax * scale + offsetX) - headlen * Math.cos(angle + Math.PI / 6),
-          (ay * scale + offsetX) - headlen * Math.sin(angle + Math.PI / 6)
+          axpx - headlen * Math.cos(angle + Math.PI / 6),
+          aypx - headlen * Math.sin(angle + Math.PI / 6)
         );
         ctx.stroke();
       }

@@ -94,25 +94,32 @@ from numba import njit
 
 # Acoplamiento giro–velocidad: el ángulo de dirección efectivo se reduce
 # linealmente con la rapidez. A velocidad máxima el volante llega a
-# (1 - STEER_SPEED_C) del tope; a coche parado, al tope entero. Es un efecto
-# LIGERO (como en la vida real: a más velocidad, menos giro para no derrapar),
-# no un límite agresivo.
+# (1 - STEER_SPEED_C) del tope; a coche parado, al tope entero. Como en la vida
+# real: a más velocidad, menos giro. Efecto SUAVE a propósito: es el único freno
+# físico del giro (ya no hay tope de aceleración lateral), así que en curvas
+# normales el coche conserva volante y NO tiene que frenar; solo un giro muy
+# cerrado (que exige casi todo el volante) requiere ir despacio. La vuelta final
+# no uniforme sale del frenado realista de aproximación, no de este parámetro.
 STEER_SPEED_C = 0.35
 
 
-# Aceleración lateral (centrípeta) máxima admisible en curva, en m/s². Impone
-# un límite de velocidad EN FUNCIÓN DE LA CURVATURA del giro: v_max_curva =
-# sqrt(A_LAT_MAX / |κ|), con κ = tan(δ)/L la curvatura del arco. Esto hace que
-# el vehículo:
-#   · reduzca la velocidad al ENTRAR en una curva (y de forma gradual, acotada
-#     por su a_max, sin frenazos bruscos),
-#   · MANTENGA la velocidad reducida MIENTRAS dura la curva (no solo al principio),
-#   · y vuelva a acelerar SOLO cuando el giro se abre (κ → 0), no antes.
-# Es el mismo criterio físico que usa un conductor: en las rectas, rápido; en
-# los giros cerrados, despacio y sostenido. Sustituye al comportamiento anterior
-# —velocidad ligada solo al tiempo/colisión— que producía frenar-y-acelerar en
-# mitad del giro.
-A_LAT_MAX = 1.5
+# Velocidad de crucero de la MANIOBRA FINAL, como fracción de la v_max del
+# vehículo. La última maniobra (tramo de reorientación + remate) se hace TODA a
+# esta velocidad reducida: más cómoda para el pasajero y, al ir lento, con casi
+# todo el volante disponible (acoplamiento giro–velocidad) para el giro cerrado
+# de entrada. Antes solo iba lento el primer tramo y el remate volvía a acelerar
+# a v_max; con esto no. El frenado final hasta parar sigue mandando cerca de la
+# meta. Subir = maniobra más rápida; bajar = más lenta y con más giro.
+V_MAN_FRAC = 0.45
+
+
+# NOTA: se eliminó el límite de velocidad por aceleración lateral (un tope de
+# rapidez universal en función de la curvatura). Rebajaba la velocidad al girar
+# de forma ARTIFICIAL e igual para todos los vehículos, y hacía las curvas
+# regulares. La física del giro la lleva ahora SOLO el acoplamiento
+# giro–velocidad (STEER_SPEED_C): la rapidez limita el volante disponible —propio
+# de cada vehículo por su delta_max— y el coche opera dentro de ese límite. La
+# única rebaja de velocidad es la del frenado realista de aproximación a la meta.
 
 
 # Relajación del ÁNGULO DE LLEGADA (red de seguridad para que todo vehículo
@@ -319,23 +326,11 @@ def _k_expand(x0, y0, th0, v0, k, acc, dl, subpasos, h, L, amax,
         ok = 1
         ac = acc[a]; dl_a = dl[a]
         for sp in range(subpasos):
-            v_ant = v
             v = min(vmaxc, max(-vrev, v + ac * h))
-            # Límite de velocidad por aceleración lateral en curva: en un giro de
-            # curvatura κ = tan(δ)/L la rapidez no puede superar sqrt(A_LAT/κ).
-            # El descenso se acota a amax·h por subpaso para que la entrada en la
-            # curva sea una frenada suave (no un frenazo), y el límite se
-            # mantiene mientras dure el giro.
-            kap = abs(tan(dl_a)) / L
-            if kap > 1e-9:
-                v_turn = sqrt(A_LAT_MAX / kap)
-                if v > v_turn:
-                    v = v_turn
-                if -v > v_turn:
-                    v = -v_turn
-            piso = v_ant - amax * h
-            if v < piso:
-                v = piso
+            # La rapidez limita el VOLANTE (acoplamiento giro–velocidad): a más
+            # velocidad, menos ángulo de dirección efectivo. El coche opera
+            # DENTRO de ese límite; NO se rebaja la velocidad por la curva —la
+            # única frenada es la realista de aproximación a la meta—.
             av = v if v >= 0.0 else -v
             dtn = tan(dl_a * (1.0 - STEER_SPEED_C * (av / vmaxc)))
             th = th + (1.0 / L) * dtn * (v * h)
@@ -425,8 +420,15 @@ def _k_tiro(x, y, th, v, k, gx, gy, gth, con_ang, ang_tol,
         if d_freno < 0.0:
             d_freno = 0.0
         v_des = sqrt(0.25 * v_tol * v_tol + 2.0 * 0.85 * amax * d_freno)
-        if v_des > vmaxc:
-            v_des = vmaxc
+        # La maniobra final (con ángulo de llegada) va TODA a velocidad reducida:
+        # el crucero se topa a V_MAN_FRAC·vmax en vez de a vmax, para que el
+        # remate NO vuelva a acelerar tras el tramo de reorientación. La parábola
+        # de frenado sigue mandando al acercarse (frena hasta parar).
+        v_top = V_MAN_FRAC * vmaxc if con_ang == 1 else vmaxc
+        if v_top < 0.4:
+            v_top = 0.4
+        if v_des > v_top:
+            v_des = v_top
         dv = max(-amax * h, min(amax * h, v_des - v))
         v = min(vmaxc, max(0.0, v + dv))
         alpha = atan2(ty - y, tx - x) - th
@@ -438,19 +440,13 @@ def _k_tiro(x, y, th, v, k, gx, gy, gth, con_ang, ang_tol,
         den = dt_ if dt_ < ld else ld
         if den < 1e-3:
             den = 1e-3
-        # Tope de dirección reducido con la rapidez (giro–velocidad).
+        # Tope de dirección reducido con la rapidez (giro–velocidad): a más
+        # velocidad, menos volante disponible. El coche gira DENTRO de ese tope;
+        # no se rebaja la velocidad por la curvatura. La única frenada es la
+        # realista de aproximación (v_des, arriba): entra al giro con la
+        # velocidad que trae y va frenando, así el arco se cierra al ralentizar.
         dmax_v = dmax * (1.0 - STEER_SPEED_C * (v / vmaxc))
         delta = max(-dmax_v, min(dmax_v, atan2(2.0 * L * sin(alpha), den)))
-        # Límite por aceleración lateral: en el giro final la velocidad se reduce
-        # según la curvatura y se mantiene baja durante todo el arco (frenada
-        # suave, acotada por amax; nada de acelerar en mitad de la curva).
-        kap = abs(tan(delta)) / L
-        if kap > 1e-9:
-            v_turn = sqrt(A_LAT_MAX / kap)
-            if v > v_turn:
-                v = v_turn
-                if v < v_ant - amax * h:
-                    v = v_ant - amax * h
         th = th + (1.0 / L) * tan(delta) * (v * h)
         x = x + cos(th) * v * h
         y = y + sin(th) * v * h
@@ -520,9 +516,11 @@ def _k_maniobra(x, y, th, v0, k, gx, gy, gth, ang_tol,
     steers = (-1.0, -0.5, 0.0, 0.5, 1.0)     # fracción del giro máximo
     seg_max = 30                             # subpasos máximos del tramo de ida
     tail_max = 70                            # subpasos máximos del frenado
-    v_man = 0.5 * vmaxc
-    if v_man < 0.5:
-        v_man = 0.5
+    # Crucero de la maniobra final DELIBERADAMENTE bajo (misma constante que el
+    # remate): toda la maniobra despacio, con más volante disponible para el giro.
+    v_man = V_MAN_FRAC * vmaxc
+    if v_man < 0.4:
+        v_man = 0.4
     va0 = v0 if v0 >= 0.0 else -v0            # rapidez de entrada
     best_n = -1
     best_total = 1e18
@@ -542,7 +540,6 @@ def _k_maniobra(x, y, th, v0, k, gx, gy, gth, ang_tol,
             # HACIA DELANTE arrastra v0; MARCHA ATRÁS arranca PARADO.
             vmag = va0 if adelante else 0.0
             for step in range(seg_max):
-                vmag_ant = vmag
                 # Aproxima la velocidad de crucero de maniobra respetando a_max en
                 # ambos sentidos: si se entra por encima, frena suave (no en seco);
                 # si por debajo, acelera. Con v0=0 (marcha atrás) es la rampa de
@@ -553,14 +550,9 @@ def _k_maniobra(x, y, th, v0, k, gx, gy, gth, ang_tol,
                         vmag = v_man
                 else:
                     vmag = min(v_man, vmag + amax * h)
-                kap = abs(tan(frac * dmax)) / L
-                if kap > 1e-9:
-                    v_turn = sqrt(A_LAT_MAX / kap)
-                    if vmag > v_turn:
-                        vmag = v_turn
-                        if vmag < vmag_ant - amax * h:   # descenso acotado: sin frenazo
-                            vmag = vmag_ant - amax * h
                 vv = dirf * vmag
+                # El volante disponible se reduce con la velocidad; a este crucero
+                # bajo queda casi entero. No se rebaja la velocidad por la curva.
                 fdel = tan(frac * dmax * (1.0 - STEER_SPEED_C * (vmag / vmaxc)))
                 th1 = th1 + (1.0 / L) * fdel * (vv * h)
                 x1 = x1 + cos(th1) * vv * h
@@ -653,17 +645,15 @@ def _k_seg(x, y, th, k, dirf, frac, npasos, L, dmax, vmaxc, amax, h,
     de frenado hasta v=0 (la inversión de sentido siempre pasa por velocidad
     nula). Escribe las poses en out[base:] y devuelve (n, x, y, th, k) con la
     pose final; n = -1 si el tramo choca o se sale del mundo."""
-    v_man = 0.5 * vmaxc
-    if v_man < 0.5:
-        v_man = 0.5
+    # Crucero bajo de maniobra (misma constante que la de una fase y el remate):
+    # toda despacio, con más volante disponible. Sin rebaja por curvatura; el tope
+    # de dirección ya se reduce con la velocidad más abajo.
+    v_man = V_MAN_FRAC * vmaxc
+    if v_man < 0.4:
+        v_man = 0.4
     tope_cola = amax * h * 60.0        # la cola de frenado debe caber en 60 subpasos
     if v_man > tope_cola:
         v_man = tope_cola
-    kap = abs(tan(frac * dmax)) / L
-    if kap > 1e-9:
-        v_turn = sqrt(A_LAT_MAX / kap)
-        if v_man > v_turn:
-            v_man = v_turn
     n = 0
     vmag = 0.0
     for fase in range(2):
@@ -914,6 +904,15 @@ class Entorno:
         self.rects = [list(map(float, r)) for r in rects]
         self._empaquetar(obs)
 
+    def desde_poligonos(self, polys, nombre="importado"):
+        """Construye el mapa a partir de polígonos (cajas ORIENTADAS de 4 esquinas)
+        en metros. A diferencia de `desde_rects`, admite obstáculos rotados, así que
+        `self.rects` queda a None y la persistencia usa la rama de `obstaculos`."""
+        obs = [[(float(px), float(py)) for px, py in pol] for pol in polys]
+        self.origen = nombre
+        self.rects = None
+        self._empaquetar(obs)
+
     def libre(self, x, y, theta, length, width, margen=0.0):
         """¿Cabe el vehículo (OBB) sin tocar bordes ni obstáculos?"""
         Lm = length + 2.0 * margen
@@ -1024,29 +1023,615 @@ def imagen_a_rects(ruta):
             for ix, iy, w, h in grid_a_rects(grid)]
 
 
-def guardar_mapa(nombre, rects):
-    """Guarda el mapa (rectángulos en metros) en `mapas/<nombre>.json` para poder
-    recargarlo en cualquier otra ejecución del programa."""
+# --------------------------------------------------------------------------- #
+# Imagen → POLÍGONOS de forma libre (contorno real + relleno)
+#
+# En vez de forzar rectángulos, se detecta el CONTORNO real de cada mancha de
+# obstáculo y se rellena en triángulos. Así una forma diagonal, en L o curva se
+# reproduce con fidelidad (sus aristas son las líneas de colisión) y su interior
+# queda cubierto de obstáculo (los vehículos no pueden aparecer dentro). Método:
+#   1. Rejilla de ocupación (negro = obstáculo), fina.
+#   2. Se extraen las aristas de frontera (lados de celda ocupada con vecino libre)
+#      y se encadenan en lazos cerrados → el contorno exacto de cada forma.
+#   3. Douglas-Peucker simplifica cada lazo: las "escaleras" de una pared diagonal
+#      colapsan a una recta diagonal limpia; se conservan los vértices reales.
+#   4. Cada lazo se triangula (ear clipping) para rellenar el interior. El motor
+#      SAT es de 4 esquinas, así que cada triángulo se emite como cuadrilátero
+#      DEGENERADO [A, B, C, C] (el eje repetido es (0,0), que el SAT ya ignora).
+# Nota: los huecos interiores de una forma se rellenan como sólido (macizo).
+# --------------------------------------------------------------------------- #
+IMG_POLY_NX = 480        # rejilla de muestreo (a mayor nº, más fidelidad de contorno)
+IMG_POLY_NY = 288        # mantiene la proporción 40:24 del mundo
+POLY_TOL_CELDAS = 1.5    # tolerancia Douglas-Peucker en nº de celdas (suaviza escaleras)
+POLY_ENDEREZAR_DEG = 8.0  # aristas a < este ángulo de la horizontal/vertical se enderezan
+
+
+def _cruz(a, b, c):
+    """Producto cruzado (b-a)×(c-a): >0 giro a la izquierda (CCW)."""
+    return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+
+
+def _area_con_signo(pts):
+    """Área con signo (shoelace); >0 si el polígono está en orden CCW."""
+    s = 0.0
+    n = len(pts)
+    for i in range(n):
+        x1, y1 = pts[i]
+        x2, y2 = pts[(i + 1) % n]
+        s += x1 * y2 - x2 * y1
+    return 0.5 * s
+
+
+def _contornos_grid(grid):
+    """Lazos de frontera (listas de vértices en coordenadas de esquina de celda)
+    de las manchas ocupadas. Cada lado de una celda ocupada cuyo vecino está libre
+    es una arista dirigida (obstáculo a la izquierda); encadenándolas por extremos
+    salen los contornos exteriores (CCW) y de los huecos (CW)."""
+    nx = len(grid); ny = len(grid[0]) if nx else 0
+
+    def occ(x, y):
+        return 0 <= x < nx and 0 <= y < ny and grid[x][y]
+
+    sig = {}                                   # vértice inicio → lista de vértices fin
+    for ix in range(nx):
+        col = grid[ix]
+        for iy in range(ny):
+            if not col[iy]:
+                continue
+            c00 = (ix, iy); c10 = (ix + 1, iy)
+            c11 = (ix + 1, iy + 1); c01 = (ix, iy + 1)
+            if not occ(ix, iy - 1): sig.setdefault(c00, []).append(c10)   # lado inferior
+            if not occ(ix + 1, iy): sig.setdefault(c10, []).append(c11)   # lado derecho
+            if not occ(ix, iy + 1): sig.setdefault(c11, []).append(c01)   # lado superior
+            if not occ(ix - 1, iy): sig.setdefault(c01, []).append(c00)   # lado izquierdo
+
+    lazos = []
+    for inicio in list(sig.keys()):
+        while sig.get(inicio):
+            lazo = [inicio]; cur = inicio; cerrado = False
+            while True:
+                salientes = sig.get(cur)
+                if not salientes:
+                    break
+                nxt = salientes.pop()
+                if not sig[cur]:
+                    del sig[cur]
+                if nxt == inicio:
+                    cerrado = True
+                    break
+                lazo.append(nxt); cur = nxt
+            if cerrado and len(lazo) >= 3:
+                lazos.append(lazo)
+    return lazos
+
+
+def _limpiar_colineales(pts):
+    """Quita vértices duplicados y colineales de un polígono cerrado."""
+    q = []
+    for p in pts:
+        if not q or abs(p[0] - q[-1][0]) > 1e-9 or abs(p[1] - q[-1][1]) > 1e-9:
+            q.append(p)
+    if len(q) > 1 and abs(q[0][0] - q[-1][0]) < 1e-9 and abs(q[0][1] - q[-1][1]) < 1e-9:
+        q.pop()
+    n = len(q)
+    if n < 3:
+        return q
+    out = []
+    for i in range(n):
+        a = q[(i - 1) % n]; b = q[i]; c = q[(i + 1) % n]
+        if abs(_cruz(a, b, c)) > 1e-9:
+            out.append(b)
+    return out
+
+
+def _dist_pt_seg(p, a, b):
+    """Distancia del punto p al segmento ab."""
+    ax, ay = a; bx, by = b; px, py = p
+    dx = bx - ax; dy = by - ay
+    L2 = dx * dx + dy * dy
+    if L2 < 1e-18:
+        return math.hypot(px - ax, py - ay)
+    t = ((px - ax) * dx + (py - ay) * dy) / L2
+    t = 0.0 if t < 0 else (1.0 if t > 1 else t)
+    return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
+
+
+def _dp_abierto(pts, tol):
+    """Douglas-Peucker sobre una polilínea (extremos fijos). Iterativo (sin
+    recursión) para soportar lazos con muchos puntos."""
+    n = len(pts)
+    if n < 3:
+        return pts[:]
+    keep = [False] * n
+    keep[0] = keep[n - 1] = True
+    pila = [(0, n - 1)]
+    while pila:
+        i, j = pila.pop()
+        if j <= i + 1:
+            continue
+        a = pts[i]; b = pts[j]
+        dmax = -1.0; idx = -1
+        for k in range(i + 1, j):
+            d = _dist_pt_seg(pts[k], a, b)
+            if d > dmax:
+                dmax = d; idx = k
+        if dmax > tol and idx != -1:
+            keep[idx] = True
+            pila.append((i, idx)); pila.append((idx, j))
+    return [pts[k] for k in range(n) if keep[k]]
+
+
+def _dp_cerrado(pts, tol):
+    """Douglas-Peucker sobre un polígono cerrado: se parte en el vértice más lejano
+    al primero y se simplifican las dos cadenas."""
+    n = len(pts)
+    if n < 4:
+        return pts
+    p0 = pts[0]
+    lejos = max(range(n), key=lambda i: (pts[i][0] - p0[0]) ** 2 + (pts[i][1] - p0[1]) ** 2)
+    if lejos == 0:
+        return pts
+    ra = _dp_abierto(pts[0:lejos + 1], tol)
+    rb = _dp_abierto(pts[lejos:] + [pts[0]], tol)
+    return ra[:-1] + rb[:-1]
+
+
+def _enderezar_ejes(pts, tol_deg):
+    """Ajusta las aristas casi horizontales/verticales a exactamente horizontal o
+    vertical (dentro de `tol_deg` grados). Corrige paredes que salen 'tuertas' y
+    mantiene los ángulos rectos (cuadrados) intactos, sin tocar las diagonales
+    reales (que superan la tolerancia)."""
+    if tol_deg <= 0 or len(pts) < 3:
+        return pts
+    tan_tol = math.tan(math.radians(tol_deg))
+    p = [list(v) for v in pts]                   # copia mutable; a/b comparten vértice
+    n = len(p)
+    for _ in range(2):                           # un par de pasadas para converger
+        for i in range(n):
+            a = p[i]; b = p[(i + 1) % n]
+            dx = b[0] - a[0]; dy = b[1] - a[1]
+            adx = abs(dx); ady = abs(dy)
+            if adx < 1e-9 and ady < 1e-9:
+                continue
+            if ady <= adx * tan_tol:             # casi horizontal → misma y
+                ym = 0.5 * (a[1] + b[1]); a[1] = ym; b[1] = ym
+            elif adx <= ady * tan_tol:           # casi vertical → misma x
+                xm = 0.5 * (a[0] + b[0]); a[0] = xm; b[0] = xm
+    return [tuple(v) for v in p]
+
+
+# --------------------------------------------------------------------------- #
+# Triangulación de polígonos CON HUECOS (port de 'earcut' de Mapbox)
+#
+# Ear clipping robusto con soporte de agujeros: enlaza cada hueco al contorno
+# exterior con un "puente" correcto (rayo hacia la izquierda desde el vértice más
+# a la izquierda del hueco) y triangula, con reintentos que curan intersecciones
+# locales. Es el estándar probado; sustituye a un bridging casero que fallaba en
+# formas con varios huecos (metía triángulos dentro de un hueco).
+# --------------------------------------------------------------------------- #
+class _EcN:
+    __slots__ = ("i", "x", "y", "prev", "next", "steiner")
+
+    def __init__(self, i, x, y):
+        self.i = i; self.x = x; self.y = y
+        self.prev = None; self.next = None
+        self.steiner = False
+
+
+def _ec_area(p, q, r):
+    return (q.y - p.y) * (r.x - q.x) - (q.x - p.x) * (r.y - q.y)
+
+
+def _ec_iguales(p1, p2):
+    return p1.x == p2.x and p1.y == p2.y
+
+
+def _ec_signo(x):
+    return 1 if x > 0 else (-1 if x < 0 else 0)
+
+
+def _ec_area_anillo(anillo):
+    s = 0.0; n = len(anillo); j = n - 1
+    for i in range(n):
+        s += (anillo[j][0] - anillo[i][0]) * (anillo[i][1] + anillo[j][1])
+        j = i
+    return s
+
+
+def _ec_insertar(i, x, y, ultimo):
+    p = _EcN(i, x, y)
+    if ultimo is None:
+        p.prev = p; p.next = p
+    else:
+        p.next = ultimo.next; p.prev = ultimo
+        ultimo.next.prev = p; ultimo.next = p
+    return p
+
+
+def _ec_quitar(p):
+    p.next.prev = p.prev
+    p.prev.next = p.next
+
+
+def _ec_anillo(anillo, sentido_horario, contador):
+    """Construye una lista doblemente enlazada del anillo con la orientación pedida."""
+    s = _ec_area_anillo(anillo)
+    ultimo = None
+    it = anillo if (s > 0) == sentido_horario else reversed(anillo)
+    for (x, y) in it:
+        ultimo = _ec_insertar(contador[0], x, y, ultimo)
+        contador[0] += 1
+    if ultimo is not None and _ec_iguales(ultimo, ultimo.next):
+        _ec_quitar(ultimo)
+        ultimo = ultimo.next
+    return ultimo
+
+
+def _ec_filtrar(inicio, fin=None):
+    if inicio is None:
+        return inicio
+    if fin is None:
+        fin = inicio
+    p = inicio
+    while True:
+        otra = False
+        if not p.steiner and (_ec_iguales(p, p.next) or _ec_area(p.prev, p, p.next) == 0):
+            _ec_quitar(p)
+            p = fin = p.prev
+            if p is p.next:
+                break
+            otra = True
+        else:
+            p = p.next
+        if not (otra or p is not fin):
+            break
+    return fin
+
+
+def _ec_en_triangulo(ax, ay, bx, by, cx, cy, px, py):
+    return ((cx - px) * (ay - py) - (ax - px) * (cy - py) >= 0 and
+            (ax - px) * (by - py) - (bx - px) * (ay - py) >= 0 and
+            (bx - px) * (cy - py) - (cx - px) * (by - py) >= 0)
+
+
+def _ec_es_oreja(oreja):
+    a = oreja.prev; b = oreja; c = oreja.next
+    if _ec_area(a, b, c) >= 0:
+        return False                              # reflejo → no es oreja
+    p = oreja.next.next
+    while p is not oreja.prev:
+        if (_ec_en_triangulo(a.x, a.y, b.x, b.y, c.x, c.y, p.x, p.y) and
+                _ec_area(p.prev, p, p.next) >= 0):
+            return False
+        p = p.next
+    return True
+
+
+def _ec_en_segmento(p, q, r):
+    return (q.x <= max(p.x, r.x) and q.x >= min(p.x, r.x) and
+            q.y <= max(p.y, r.y) and q.y >= min(p.y, r.y))
+
+
+def _ec_intersecta(p1, q1, p2, q2):
+    o1 = _ec_signo(_ec_area(p1, q1, p2)); o2 = _ec_signo(_ec_area(p1, q1, q2))
+    o3 = _ec_signo(_ec_area(p2, q2, p1)); o4 = _ec_signo(_ec_area(p2, q2, q1))
+    if o1 != o2 and o3 != o4:
+        return True
+    if o1 == 0 and _ec_en_segmento(p1, p2, q1):
+        return True
+    if o2 == 0 and _ec_en_segmento(p1, q2, q1):
+        return True
+    if o3 == 0 and _ec_en_segmento(p2, p1, q2):
+        return True
+    if o4 == 0 and _ec_en_segmento(p2, q1, q2):
+        return True
+    return False
+
+
+def _ec_intersecta_poligono(a, b):
+    p = a
+    while True:
+        if (p.i != a.i and p.next.i != a.i and p.i != b.i and p.next.i != b.i and
+                _ec_intersecta(p, p.next, a, b)):
+            return True
+        p = p.next
+        if p is a:
+            return False
+
+
+def _ec_localmente_dentro(a, b):
+    if _ec_area(a.prev, a, a.next) < 0:
+        return _ec_area(a, b, a.next) >= 0 and _ec_area(a, a.prev, b) >= 0
+    return _ec_area(a, b, a.prev) < 0 or _ec_area(a, a.next, b) < 0
+
+
+def _ec_medio_dentro(a, b):
+    p = a; dentro = False
+    px = (a.x + b.x) / 2.0; py = (a.y + b.y) / 2.0
+    while True:
+        if ((p.y > py) != (p.next.y > py) and p.next.y != p.y and
+                px < (p.next.x - p.x) * (py - p.y) / (p.next.y - p.y) + p.x):
+            dentro = not dentro
+        p = p.next
+        if p is a:
+            break
+    return dentro
+
+
+def _ec_diagonal_valida(a, b):
+    return (a.next.i != b.i and a.prev.i != b.i and not _ec_intersecta_poligono(a, b) and
+            ((_ec_localmente_dentro(a, b) and _ec_localmente_dentro(b, a) and
+              _ec_medio_dentro(a, b) and
+              (_ec_area(a.prev, a, b.prev) != 0 or _ec_area(a, b.prev, b) != 0)) or
+             (_ec_iguales(a, b) and _ec_area(a.prev, a, a.next) > 0 and
+              _ec_area(b.prev, b, b.next) > 0)))
+
+
+def _ec_partir_poligono(a, b):
+    a2 = _EcN(a.i, a.x, a.y); b2 = _EcN(b.i, b.x, b.y)
+    an = a.next; bp = b.prev
+    a.next = b; b.prev = a
+    a2.next = an; an.prev = a2
+    b2.next = a2; a2.prev = b2
+    bp.next = b2; b2.prev = bp
+    return b2
+
+
+def _ec_curar(inicio, triangulos):
+    p = inicio
+    while True:
+        a = p.prev; b = p.next.next
+        if (not _ec_iguales(a, b) and _ec_intersecta(a, p, p.next, b) and
+                _ec_localmente_dentro(a, b) and _ec_localmente_dentro(b, a)):
+            triangulos.append(((a.x, a.y), (p.x, p.y), (b.x, b.y)))
+            _ec_quitar(p); _ec_quitar(p.next)
+            p = inicio = b
+        p = p.next
+        if p is inicio:
+            break
+    return _ec_filtrar(p)
+
+
+def _ec_partir_earcut(inicio, triangulos):
+    a = inicio
+    while True:
+        b = a.next.next
+        while b is not a.prev:
+            if a.i != b.i and _ec_diagonal_valida(a, b):
+                c = _ec_partir_poligono(a, b)
+                a = _ec_filtrar(a, a.next)
+                c = _ec_filtrar(c, c.next)
+                _ec_earcut_linked(a, triangulos, 0)
+                _ec_earcut_linked(c, triangulos, 0)
+                return
+            b = b.next
+        a = a.next
+        if a is inicio:
+            break
+
+
+def _ec_earcut_linked(oreja, triangulos, pasada):
+    if oreja is None:
+        return
+    stop = oreja
+    while oreja.prev is not oreja.next:
+        prev = oreja.prev; nxt = oreja.next
+        if _ec_es_oreja(oreja):
+            triangulos.append(((prev.x, prev.y), (oreja.x, oreja.y), (nxt.x, nxt.y)))
+            _ec_quitar(oreja)
+            oreja = nxt.next; stop = nxt.next
+            continue
+        oreja = nxt
+        if oreja is stop:
+            if pasada == 0:
+                _ec_earcut_linked(_ec_filtrar(oreja), triangulos, 1)
+            elif pasada == 1:
+                oreja = _ec_curar(_ec_filtrar(oreja), triangulos)
+                _ec_earcut_linked(oreja, triangulos, 2)
+            elif pasada == 2:
+                _ec_partir_earcut(oreja, triangulos)
+            break
+
+
+def _ec_mas_izquierda(inicio):
+    p = inicio; izq = inicio
+    while True:
+        if p.x < izq.x or (p.x == izq.x and p.y < izq.y):
+            izq = p
+        p = p.next
+        if p is inicio:
+            break
+    return izq
+
+
+def _ec_sector_contiene(m, p):
+    return _ec_area(m.prev, m, p.prev) < 0 and _ec_area(p.next, m, m.next) < 0
+
+
+def _ec_buscar_puente(hueco, exterior):
+    p = exterior
+    hx = hueco.x; hy = hueco.y
+    qx = -1e18; m = None
+    while True:                                   # rayo hacia la izquierda desde el hueco
+        if hy <= p.y and hy >= p.next.y and p.next.y != p.y:
+            x = p.x + (hy - p.y) * (p.next.x - p.x) / (p.next.y - p.y)
+            if x <= hx and x > qx:
+                qx = x
+                m = p if p.x < p.next.x else p.next
+                if x == hx:
+                    return m
+        p = p.next
+        if p is exterior:
+            break
+    if m is None:
+        return None
+    stop = m; mx = m.x; my = m.y
+    tan_min = 1e18
+    p = m
+    while True:
+        if (hx >= p.x >= mx and hx != p.x and
+                _ec_en_triangulo(hx if hy < my else qx, hy, mx, my,
+                                 qx if hy < my else hx, hy, p.x, p.y)):
+            tan = abs(hy - p.y) / (hx - p.x)
+            if (_ec_localmente_dentro(p, hueco) and
+                    (tan < tan_min or (tan == tan_min and
+                     (p.x > m.x or (p.x == m.x and _ec_sector_contiene(m, p)))))):
+                m = p; tan_min = tan
+        p = p.next
+        if p is stop:
+            break
+    return m
+
+
+def _ec_eliminar_huecos(huecos, exterior, contador):
+    cola = []
+    for anillo in huecos:
+        lista = _ec_anillo(anillo, False, contador)
+        if lista is None:
+            continue
+        if lista is lista.next:
+            lista.steiner = True
+        cola.append(_ec_mas_izquierda(lista))
+    cola.sort(key=lambda n: (n.x, n.y))
+    for h in cola:
+        puente = _ec_buscar_puente(h, exterior)
+        if puente is None:
+            continue
+        inverso = _ec_partir_poligono(puente, h)
+        _ec_filtrar(inverso, inverso.next)
+        exterior = _ec_filtrar(puente, puente.next)
+    return exterior
+
+
+def _triangular_con_huecos(exterior, huecos):
+    """Triangula el contorno exterior descontando los huecos. Devuelve lista de
+    triángulos (cada uno, 3 vértices (x, y)). Rellena el interior menos los huecos."""
+    contador = [0]
+    nodo = _ec_anillo(exterior, True, contador)
+    if nodo is None or nodo.next is nodo.prev:
+        return []
+    if huecos:
+        nodo = _ec_eliminar_huecos(huecos, nodo, contador)
+    triangulos = []
+    _ec_earcut_linked(nodo, triangulos, 0)
+    return triangulos
+
+
+def _punto_en_poligono(p, poly):
+    """Test punto-en-polígono por lanzamiento de rayo (par/impar)."""
+    x, y = p
+    dentro = False
+    n = len(poly)
+    j = n - 1
+    for i in range(n):
+        xi, yi = poly[i]; xj, yj = poly[j]
+        if (yi > y) != (yj > y):
+            xc = (xj - xi) * (y - yi) / (yj - yi + 1e-18) + xi
+            if x < xc:
+                dentro = not dentro
+        j = i
+    return dentro
+
+
+def imagen_a_poligonos(ruta, nx=IMG_POLY_NX, ny=IMG_POLY_NY, umbral=IMG_UMBRAL,
+                       tol=None):
+    """Imagen → lista de polígonos (de 4 esquinas; triángulos como cuadrilátero
+    degenerado) que reproducen el contorno real de cada forma y rellenan su interior.
+    Sustituye a imagen_a_rects para admitir obstáculos de forma libre.
+    Preserva los HUECOS: el espacio libre rodeado de obstáculo (habitaciones, etc.)
+    no se rellena, porque cada hueco se descuenta de su forma exterior."""
+    grid = imagen_a_grid(ruta, nx, ny, umbral)
+    gx = len(grid); gy = len(grid[0]) if gx else 0
+    if gx == 0 or gy == 0:
+        return []
+    res_x = W / gx; res_y = H / gy
+    if tol is None:
+        tol = POLY_TOL_CELDAS * max(res_x, res_y)
+
+    # Lazos → metros y simplificados. Los de área positiva son contornos exteriores
+    # (obstáculo macizo); los de área negativa son huecos (espacio libre interior).
+    exteriores = []
+    huecos = []
+    for lazo in _contornos_grid(grid):
+        pts = _limpiar_colineales([(vx * res_x, vy * res_y) for vx, vy in lazo])
+        if len(pts) < 3:
+            continue
+        pts = _dp_cerrado(pts, tol)
+        pts = _enderezar_ejes(pts, POLY_ENDEREZAR_DEG)
+        pts = _limpiar_colineales(pts)
+        if len(pts) < 3:
+            continue
+        if _area_con_signo(pts) > 0:
+            exteriores.append(pts)               # contorno exterior (CCW)
+        else:
+            huecos.append(pts)                   # hueco (CW), para descontar con earcut
+
+    # Cada hueco se asigna al contorno exterior más pequeño que lo contiene.
+    asignados = [[] for _ in exteriores]
+    for h in huecos:
+        cont = [(abs(_area_con_signo(o)), oi)
+                for oi, o in enumerate(exteriores) if _punto_en_poligono(h[0], o)]
+        if cont:
+            asignados[min(cont)[1]].append(h)
+
+    salida = []
+    for oi, outer in enumerate(exteriores):
+        for a, b, c in _triangular_con_huecos(outer, asignados[oi]):
+            salida.append([a, b, c, c])         # triángulo → cuadrilátero degenerado
+    return salida
+
+
+def guardar_mapa(nombre, rects=None, polys=None):
+    """Guarda el mapa en `mapas/<nombre>.json` para recargarlo en otra ejecución.
+    Admite dos formatos: rectángulos alineados (`rects`, [x, y, w, h]) o cajas
+    ORIENTADAS/polígonos (`polys`, listas de 4 esquinas). Incluye el tamaño de
+    mundo para poder reescalar al cargar."""
     os.makedirs(MAPAS_DIR, exist_ok=True)
     nombre = "".join(c for c in nombre if c.isalnum() or c in "-_ ").strip()
     if not nombre:
         nombre = "mapa"
     ruta = os.path.join(MAPAS_DIR, nombre + ".json")
+    datos = {"version": 1, "mundo": [W, H]}
+    if polys is not None:
+        datos["obstaculos"] = [[[float(px), float(py)] for px, py in pol]
+                               for pol in polys]
+    else:
+        datos["rects"] = [list(map(float, r)) for r in (rects or [])]
     with open(ruta, "w", encoding="utf-8") as f:
-        json.dump({"version": 1, "mundo": [W, H],
-                   "rects": [list(map(float, r)) for r in rects]}, f)
+        json.dump(datos, f)
     return ruta
 
 
 def cargar_mapa(ruta):
-    """Carga un mapa guardado. Si el mundo del fichero tenía otro tamaño, los
-    rectángulos se reescalan al mundo actual."""
+    """Carga un mapa guardado de tipo `rects` (alineado). Si el mundo del fichero
+    tenía otro tamaño, los rectángulos se reescalan al mundo actual."""
     with open(ruta, "r", encoding="utf-8") as f:
         datos = json.load(f)
     w0, h0 = datos.get("mundo", [W, H])
     fx, fy = W / w0, H / h0
     return [(rx * fx, ry * fy, rw * fx, rh * fy)
             for rx, ry, rw, rh in datos["rects"]]
+
+
+def cargar_mapa_en(env, ruta, nombre=None):
+    """Carga un mapa directamente en el entorno, detectando el formato: cajas
+    orientadas (`obstaculos`) o rectángulos alineados (`rects`, mapas antiguos).
+    Reescala si el mundo guardado tenía otro tamaño. Devuelve el nº de obstáculos."""
+    with open(ruta, "r", encoding="utf-8") as f:
+        datos = json.load(f)
+    if nombre is None:
+        nombre = os.path.splitext(os.path.basename(ruta))[0]
+    w0, h0 = datos.get("mundo", [W, H])
+    fx, fy = W / w0, H / h0
+    if datos.get("obstaculos") is not None:
+        polys = [[(px * fx, py * fy) for px, py in pol]
+                 for pol in datos["obstaculos"]]
+        env.desde_poligonos(polys, nombre)
+        return len(polys)
+    rects = [(rx * fx, ry * fy, rw * fx, rh * fy)
+             for rx, ry, rw, rh in datos["rects"]]
+    env.desde_rects(rects, nombre)
+    return len(rects)
 
 
 def listar_mapas():
@@ -1212,10 +1797,10 @@ class Planificador:
         # la búsqueda encuentre ruta en MUCHOS menos nodos (más rápida y con
         # menos memoria: clave para no agotar el tiempo/memoria del servidor y
         # para que, con el techo alto de nodos, todo vehículo resoluble llegue
-        # sin dejar coches «aparcados»). La suavidad y la reducción de velocidad
-        # en curva ya NO dependen del peso, sino del límite de aceleración
-        # lateral (A_LAT_MAX), así que subirlo no empeora los giros; solo hace
-        # las rutas algo menos óptimas (un poco más largas), cosa asumible.
+        # sin dejar coches «aparcados»). La suavidad y la forma del giro ya NO
+        # dependen del peso, sino del acoplamiento giro–velocidad, así que subirlo
+        # no empeora los giros; solo hace las rutas algo menos óptimas (un poco
+        # más largas), cosa asumible.
         tabla = {
             # nivel: (n_dir, ang_res, peso_h, max_nodos, rel_ini, rel_span,
             #         ang_tol_max, rel_ini_g, rel_span1_g, rel_span2_g,
@@ -1441,6 +2026,7 @@ class Planificador:
         self.diag = veh.diag
         L = veh.wheelbase
         dmax = veh.delta_max
+        r_min = L / max(1e-3, math.tan(dmax))   # radio de giro mínimo (para el heurístico)
         sx, sy, sth = inicio if inicio is not None else veh.inicio
         gx, gy = veh.meta
         con_ang = 0 if veh.meta_th is None else 1
@@ -1785,16 +2371,26 @@ class Planificador:
                 # la búsqueda llega «reduciendo la velocidad» hasta ~v_tol en vez
                 # de PARANDO, y el coche solo se detiene de verdad cuando de
                 # verdad va a ir marcha atrás (lo decide el conector, no el A*).
+                # Parón total artificial: SOLO se encarece cuando el nodo YA está
+                # encarado a la plaza y cerca (va a rematar) —el pozo del heurístico
+                # aún atrae a v≈0 ahí, y ningún conector necesita v<v_tol—. El caso
+                # de pasar de paso MAL encarado ya NO frena, porque el heurístico
+                # (arriba) le mantiene h alto y no lo atrae; no hace falta parche.
                 if con_ang and abs(nv) < self.v_tol:
                     d_goal_next = math.hypot(nx - gx, ny - gy)
                     if d_goal_next <= self.dist_tiro:
-                        ng += 3.0 * self.dt * (self.v_tol - abs(nv)) / self.v_tol
+                        s0 = min(0.62 * d_goal_next, 4.0 * L)
+                        a0 = ang_norm(math.atan2(
+                                gy - s0 * math.sin(gth) - ny,
+                                gx - s0 * math.cos(gth) - nx) - nth)
+                        if (abs(a0) <= self.ang_tiro
+                                and abs(ang_norm(nth - gth)) <= ang_tol_din):
+                            ng += 3.0 * self.dt * (self.v_tol - abs(nv)) / self.v_tol
                 ng += 0.10 * self.dt * abs(delta) / dmax          # ε: prefiere ir recto
                 # ε: sin temblor de volante. Reforzado: mantener el MISMO ángulo
                 # de dirección a lo largo de la curva sale mucho más barato que
-                # ir alternándolo, así la curvatura es estable y —vía el límite
-                # de aceleración lateral— la velocidad también lo es (no sube y
-                # baja en mitad del giro).
+                # ir alternándolo, así la curvatura es estable y el giro sale
+                # limpio (sin volantazos en mitad del arco).
                 ng += 0.30 * self.dt * abs(delta - dprev)
                 # ε: sin temblor de acelerador (jerk). Sin él, alternar
                 # acelerar/frenar sale gratis (el coste es solo tiempo) y el
@@ -1822,7 +2418,20 @@ class Planificador:
                             ang_to_g = math.atan2(dy_g, dx_g)
                             err_app = abs(ang_norm(gth - ang_to_g))
                             err_th = abs(ang_norm(nth - gth))
-                            hh += (0.35 * err_app + 0.25 * err_th) * (self._len / self.v_max_c)
+                            # CIERRE DEL POZO: el error de RUMBO respecto al ángulo
+                            # de llegada cuesta una reorientación que NO se abarata
+                            # al acercarse a la meta (arreglar el rumbo exige al
+                            # menos un arco de radio r_min, y para acabar EN la meta
+                            # suele hacer falta salir y volver). Antes este término
+                            # iba escalado por len/v_max (~medio segundo) y se
+                            # desvanecía: un nodo que pasaba junto a la meta MAL
+                            # ENCARADO le parecía «casi hecho» a la búsqueda (h≈0),
+                            # que entonces se metía en él frenando de paso. Ahora un
+                            # rumbo equivocado mantiene h alto —no hay incentivo en
+                            # reducir la velocidad si no se va a acabar—; solo el
+                            # nodo YA encarado (err_th≈0) tiene h≈0 y «va a acabar».
+                            hh += 1.6 * err_th * (r_min / self.v_max_c)
+                            hh += 0.35 * err_app * (self._len / self.v_max_c)
                     heapq.heappush(abierto,
                                    (ng + peso_din * hh, nid, nx, ny, nth, nv, nk, ng))
 
@@ -2613,7 +3222,7 @@ class App:
         try:
             self.estado.set("Convirtiendo imagen en mapa…")
             self.root.update()
-            rects = imagen_a_rects(ruta)
+            polys = imagen_a_poligonos(ruta)
         except Exception as e:  # noqa: BLE001
             self._ocupado = False
             messagebox.showerror("Imagen no válida",
@@ -2622,14 +3231,14 @@ class App:
                                  "(pip install pillow para el resto).")
             return
         self._ocupado = False
-        if len(rects) == 0:
+        if len(polys) == 0:
             messagebox.showwarning("Mapa vacío",
                                    "La imagen no contiene píxeles oscuros: el mapa "
                                    "queda completamente libre.")
         nombre = os.path.splitext(os.path.basename(ruta))[0]
-        self.env.desde_rects(rects, nombre)
+        self.env.desde_poligonos(polys, nombre)
         self._mapa_cambiado(f"Mapa importado de «{nombre}» "
-                            f"({len(rects)} bloques). Genera vehículos.")
+                            f"({len(polys)} bloques). Genera vehículos.")
         if messagebox.askyesno("Guardar mapa",
                                "¿Guardar este mapa en la carpeta «mapas/» para "
                                "poder reutilizarlo en otras ejecuciones?"):
@@ -2637,12 +3246,13 @@ class App:
                                          "Nombre con el que guardarlo:",
                                          initialvalue=nombre)
             if nom:
-                ruta_j = guardar_mapa(nom, rects)
+                ruta_j = guardar_mapa(nom, polys=polys)
                 self.estado.set(f"Mapa guardado en {ruta_j}")
 
     def guardar_mapa_actual(self):
         from tkinter import messagebox, simpledialog
-        if self.env.rects is None:
+        if self.env.origen == "aleatorio" or (self.env.rects is None
+                                              and not self.env.obstaculos):
             messagebox.showinfo("Solo mapas importados",
                                 "Se guardan los mapas creados desde una imagen. "
                                 "Importa una imagen primero.")
@@ -2651,7 +3261,10 @@ class App:
                                      "Nombre con el que guardarlo:",
                                      initialvalue=self.env.origen)
         if nom:
-            ruta_j = guardar_mapa(nom, self.env.rects)
+            if self.env.rects is not None:       # mapa antiguo alineado a ejes
+                ruta_j = guardar_mapa(nom, self.env.rects)
+            else:                                 # cajas orientadas
+                ruta_j = guardar_mapa(nom, polys=self.env.obstaculos)
             self.estado.set(f"Mapa guardado en {ruta_j}")
 
     def cargar_mapa_guardado(self):
@@ -2668,14 +3281,13 @@ class App:
         if not ruta:
             return
         try:
-            rects = cargar_mapa(ruta)
+            n = cargar_mapa_en(self.env, ruta)
         except Exception as e:  # noqa: BLE001
             messagebox.showerror("Mapa corrupto", f"No se pudo cargar:\n{e}")
             return
         nombre = os.path.splitext(os.path.basename(ruta))[0]
-        self.env.desde_rects(rects, nombre)
         self._mapa_cambiado(f"Mapa «{nombre}» cargado "
-                            f"({len(rects)} bloques). Genera vehículos.")
+                            f"({n} bloques). Genera vehículos.")
 
     # --------------------------- crear vehículos -------------------------- #
     def generar_posiciones(self):
@@ -2757,7 +3369,7 @@ class App:
         especs = []
         inicios, metas = [], []
         for i in range(n):
-            largo = random.uniform(1.0, 1.8)
+            largo = random.uniform(0.7, 1.2)
             ancho = largo * random.uniform(0.50, 0.62)
             sep = largo * 1.6
             ini = self._muestrear(largo, ancho, inicios, sep)
@@ -3253,10 +3865,11 @@ class App:
                           font=("", 13, "bold"))
             if veh.meta_th is not None:
                 # Flecha del ÁNGULO DE LLEGADA exigido en el destino.
-                ax = mx + 1.2 * math.cos(veh.meta_th)
-                ay = my + 1.2 * math.sin(veh.meta_th)
+                ax = mx + 0.7 * math.cos(veh.meta_th)
+                ay = my + 0.7 * math.sin(veh.meta_th)
                 c.create_line(mx * SCALE, my * SCALE, ax * SCALE, ay * SCALE,
-                              fill=col, width=2, arrow="last")
+                              fill=col, width=1, arrow="last",
+                              arrowshape=(6, 7, 2))
             poly = obb_corners(veh.inicio[0], veh.inicio[1], veh.inicio[2],
                                veh.length, veh.width)
             c.create_polygon(self._poly_px(poly), outline=col, fill="",

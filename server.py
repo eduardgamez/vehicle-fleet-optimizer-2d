@@ -219,7 +219,7 @@ def generar_especs_aleatorias(env, n):
     # mapa esté prácticamente vacío.
     puntos = []
     for i in range(n):
-        largo = random.uniform(1.0, 1.8)
+        largo = random.uniform(0.7, 1.2)
         ancho = largo * random.uniform(0.50, 0.62)
         sep = largo * 1.6
         ini = _muestrear(env, largo, ancho, puntos, sep)
@@ -389,9 +389,9 @@ def mapa_importar():
         archivo.save(tmp.name)
         tmp_path = tmp.name
     try:
-        rects = mve.imagen_a_rects(tmp_path)
+        polys = mve.imagen_a_poligonos(tmp_path)
         nombre = os.path.splitext(archivo.filename)[0]
-        env_actual.desde_rects(rects, nombre)
+        env_actual.desde_poligonos(polys, nombre)
         vehiculos_actuales = []
     except Exception as e:
         return jsonify({"ok": False, "error": f"No se pudo convertir la imagen: {e}"}), 400
