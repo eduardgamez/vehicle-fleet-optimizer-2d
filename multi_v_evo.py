@@ -95,12 +95,16 @@ from numba import njit
 # Acoplamiento giro–velocidad: el ángulo de dirección efectivo se reduce
 # linealmente con la rapidez. A velocidad máxima el volante llega a
 # (1 - STEER_SPEED_C) del tope; a coche parado, al tope entero. Como en la vida
-# real: a más velocidad, menos giro. Efecto SUAVE a propósito: es el único freno
-# físico del giro (ya no hay tope de aceleración lateral), así que en curvas
-# normales el coche conserva volante y NO tiene que frenar; solo un giro muy
-# cerrado (que exige casi todo el volante) requiere ir despacio. La vuelta final
-# no uniforme sale del frenado realista de aproximación, no de este parámetro.
-STEER_SPEED_C = 0.35
+# real: a más velocidad, menos giro. Es el ÚNICO mecanismo del giro (no hay tope
+# de aceleración lateral), y gobierna DOS efectos ligados:
+#   · Frena en las curvas: para trazar una curva más cerrada de lo que el volante
+#     (ya reducido por la velocidad) permite, el coche DEBE bajar de velocidad.
+#     A más valor, más curvas obligan a frenar.
+#   · Gana giro al ralentizar: al ir despacio (p. ej. la maniobra final) recupera
+#     volante y cierra el radio. A más valor, mayor es esa ganancia.
+# 0.35 casi no frenaba en curva ni ganaba giro; 0.55 frenaba demasiado. 0.45 es
+# el punto medio. Súbelo si quieres más de ambos efectos; bájalo si frena de más.
+STEER_SPEED_C = 0.45
 
 
 # Velocidad de crucero de la MANIOBRA FINAL, como fracción de la v_max del
@@ -111,6 +115,13 @@ STEER_SPEED_C = 0.35
 # a v_max; con esto no. El frenado final hasta parar sigue mandando cerca de la
 # meta. Subir = maniobra más rápida; bajar = más lenta y con más giro.
 V_MAN_FRAC = 0.45
+
+
+# Tope de la RELAJACIÓN del ángulo de llegada. El ángulo puede relajarse para
+# ayudar a llegar, pero NUNCA hasta invertir el SENTIDO: se limita a <90° para
+# que el coche jamás se pare mirando al revés (p. ej. 180°). Respeta el sentido,
+# no solo el eje de la orientación.
+ANG_MAX_SENTIDO = math.radians(80)
 
 
 # NOTA: se eliminó el límite de velocidad por aceleración lateral (un tope de
@@ -437,7 +448,12 @@ def _k_tiro(x, y, th, v, k, gx, gy, gth, con_ang, ang_tol,
         # sea firme al principio y el tramo restante quede recto. Cerca del punto
         # perseguido se contrae a la distancia real para homing preciso.
         dt_ = hypot(tx - x, ty - y)
-        den = dt_ if dt_ < ld else ld
+        # Lookahead que se ACORTA con la velocidad: despacio (maniobra final) el
+        # seguimiento es más firme → el piloto pide más volante y la trayectoria
+        # de llegada se CIERRA; rápido, lookahead largo → llegada suave. Así la
+        # bajada de velocidad sí aprovecha el mayor volante disponible al ralentí.
+        ld_v = ld * (0.5 + 0.5 * (v / vmaxc))
+        den = dt_ if dt_ < ld_v else ld_v
         if den < 1e-3:
             den = 1e-3
         # Tope de dirección reducido con la rapidez (giro–velocidad): a más
@@ -494,13 +510,14 @@ def _k_maniobra(x, y, th, v0, k, gx, gy, gth, ang_tol,
 
     SENTIDO Y VELOCIDAD DE ENTRADA ('v0'): una PARADA solo tiene sentido cuando se
     CAMBIA de sentido. Por eso:
-      · Rama HACIA DELANTE: ARRASTRA la velocidad de entrada v0 (no frena en seco);
-        el tramo de reorientación enlaza DIRECTAMENTE con el remate _k_tiro, que
-        parte con esa velocidad y frena de forma continua hasta la meta. Así no se
-        inserta el 'frena y vuelve a arrancar' cuando el coche sigue de frente.
-      · Rama MARCHA ATRÁS (inversión de sentido): solo se prueba si el vehículo ya
-        llega casi parado (|v0| ≤ v_tol); arranca de v=0 y, tras el tramo, decelera
-        a v=0 antes de rematar hacia delante (la inversión pasa por velocidad nula).
+      · Tramo en el MISMO sentido que v0: ARRASTRA la velocidad de entrada (no
+        frena en seco) y enlaza directo con el remate. Sin paradas intermedias.
+      · Tramo que INVIERTE el sentido: la propia maniobra antepone un PREFIJO de
+        frenado físico en recto (a_max) hasta v=0 y solo entonces invierte. Se
+        acepta CUALQUIER velocidad de entrada: el coche ya no necesita llegar
+        parado para poder plantearse ir marcha atrás (era eso lo que hacía a la
+        búsqueda detenerse "por si acaso" cerca de la meta), y la inversión
+        siempre pasa por velocidad nula (nunca salta de -v a +v).
 
     Al evaluarse como un TODO (segmento + remate, con validación de colisiones y
     de aparcamiento definitivo), la heurística de distancia de la búsqueda no la
@@ -522,23 +539,54 @@ def _k_maniobra(x, y, th, v0, k, gx, gy, gth, ang_tol,
     if v_man < 0.4:
         v_man = 0.4
     va0 = v0 if v0 >= 0.0 else -v0            # rapidez de entrada
+    # Sentido de entrada: +1 avanzando, -1 retrocediendo, 0 casi parado.
+    sv0 = 0.0
+    if v0 > v_tol:
+        sv0 = 1.0
+    elif v0 < -v_tol:
+        sv0 = -1.0
     best_n = -1
     best_total = 1e18
-    # Segmento = rampa de aceleración (prefijo compartido) + cola de frenado.
-    seg = np.empty((seg_max + tail_max, 3))
+    # Segmento = [prefijo de frenado si hay inversión] + rampa + cola de frenado.
+    seg = np.empty((tail_max + seg_max + tail_max, 3))
     for di in range(2):
         dirf = dirs[di]
         adelante = dirf > 0.0
-        # La marcha atrás invierte el sentido: exige partir DETENIDO. No se prueba
-        # si el coche aún circula (frenar en seco para retroceder es imposible).
-        if not adelante and va0 > v_tol:
-            continue
         for si in range(5):
             frac = steers[si]
             x1 = x; y1 = y; th1 = th
             kk = k
-            # HACIA DELANTE arrastra v0; MARCHA ATRÁS arranca PARADO.
-            vmag = va0 if adelante else 0.0
+            # SENTIDO: si el tramo va en el MISMO sentido que el coche, arrastra
+            # la velocidad (no frena en seco). Si INVIERTE el sentido, primero un
+            # PREFIJO de frenado físico en recto hasta v=0 (la inversión pasa por
+            # velocidad nula: nada de saltar de -v a +v de golpe).
+            nbrk = 0
+            if sv0 != 0.0 and ((sv0 > 0.0) != adelante):
+                vb = va0
+                brk_ok = True
+                while vb > 1e-3 and nbrk < tail_max:
+                    vb -= amax * h
+                    if vb < 0.0:
+                        vb = 0.0
+                    vvb = sv0 * vb
+                    x1 = x1 + cos(th1) * vvb * h
+                    y1 = y1 + sin(th1) * vvb * h
+                    kk += 1
+                    if not _k_free_sb(x1, y1, th1, Lm, Wm, worldW, worldH,
+                                      oc, oax, obb, K, blc, blax, blbb, B, diag, margin):
+                        brk_ok = False
+                        break
+                    if _k_hits_dyn(x1, y1, th1, kk, Ld, Wd,
+                                   rx, roff, rlen, rlw, rrad, R, diag, mdin):
+                        brk_ok = False
+                        break
+                    seg[nbrk, 0] = x1; seg[nbrk, 1] = y1; seg[nbrk, 2] = th1
+                    nbrk += 1
+                if not brk_ok:
+                    continue
+                vmag = 0.0
+            else:
+                vmag = va0
             for step in range(seg_max):
                 # Aproxima la velocidad de crucero de maniobra respetando a_max en
                 # ambos sentidos: si se entra por encima, frena suave (no en seco);
@@ -564,8 +612,9 @@ def _k_maniobra(x, y, th, v0, k, gx, gy, gth, ang_tol,
                 if _k_hits_dyn(x1, y1, th1, kk, Ld, Wd,
                                rx, roff, rlen, rlw, rrad, R, diag, mdin):
                     break
-                seg[step, 0] = x1; seg[step, 1] = y1; seg[step, 2] = th1
-                ncore = step + 1
+                seg[nbrk + step, 0] = x1; seg[nbrk + step, 1] = y1
+                seg[nbrk + step, 2] = th1
+                ncore = nbrk + step + 1
                 if (step & 1) != 0:          # prueba a rematar cada 2 subpasos
                     continue
                 if adelante:
@@ -2193,6 +2242,10 @@ class Planificador:
                 max_tol = max(ang_tol, self.ang_tol_max)
                 ang_tol_din = (ang_tol + (max_tol - ang_tol) * fr1
                                + (math.pi - max_tol) * fr2)
+                # Nunca se relaja hasta invertir el sentido: el coche no debe
+                # pararse mirando al revés (respeta sentido, no solo eje).
+                if ang_tol_din > ANG_MAX_SENTIDO:
+                    ang_tol_din = ANG_MAX_SENTIDO
                 fr = 0.6 * fr1 + 0.4 * fr2   # progreso combinado (para el peso)
                 if mejor_traj is not None:
                     # Ya hay llegada candidata: solo interesan llegadas
@@ -2222,6 +2275,43 @@ class Planificador:
                 con_ang_din = 0
                 peso_din = self.peso_h
 
+            # LLEGADA EN MARCHA ATRÁS (etapa 2, en reverso): si el coche viene EN
+            # RETROCESO, cerca de la meta y YA encarado con el rumbo correcto
+            # (sentido incluido: ang_tol estricto), se cierra frenando el retroceso
+            # en recto hasta parar. Así, si la maniobra que hizo lo trae pasando
+            # por la meta bien orientado, se PARA ahí: esa es la última maniobra,
+            # no vuelve a salir hacia delante y reentrar. Se prueba ANTES que el
+            # remate hacia delante (que, al apuntar la zanahoria, lo sacaría fuera).
+            if (con_ang_din and v < -self.v_tol and d_goal <= self.dist_tiro
+                    and abs(ang_norm(th - gth)) <= ang_tol):
+                bx = x; by = y; bth = th; bv = v; bk = k
+                Lm = self._len + 2.0 * self.margen; Wm = self._wid + 2.0 * self.margen
+                Ld = self._len + 2.0 * self.margen_din; Wd = self._wid + 2.0 * self.margen_din
+                btail = []
+                ok_tail = True
+                while bv < -1e-3 and len(btail) < 120:
+                    bv = min(0.0, bv + self.a_max * h)
+                    bx += math.cos(bth) * bv * h
+                    by += math.sin(bth) * bv * h
+                    bk += 1
+                    if not _k_free_sb(bx, by, bth, Lm, Wm, W, H,
+                                      oc, oax, obb, K, blc, blax, blbb, B, self.diag, self.margen):
+                        ok_tail = False; break
+                    if _k_hits_dyn(bx, by, bth, bk, Ld, Wd,
+                                   rx, roff, rlen, rlw, rrad, R, self.diag, self.margen_din):
+                        ok_tail = False; break
+                    btail.append((bx, by, bth))
+                if (ok_tail and btail
+                        and math.hypot(bx - gx, by - gy) <= self.goal_tol_fin
+                        and abs(ang_norm(bth - gth)) <= ang_tol):
+                    kfin_b = bk if bk > res_maxlen else res_maxlen
+                    if _k_aparca(bx, by, bth, bk, kfin_b, Ld, Wd,
+                                 rx, roff, rlen, rlw, rrad, R, self.diag, self.margen_din):
+                        base = self._reconstruir(padre_id, arista_id, cid, (sx, sy, sth))
+                        res = _acepta(base + btail)
+                        if res is not None:
+                            return res
+
             if d_goal <= self.dist_tiro:
                 # Se intenta PRIMERO conducir hasta el punto exacto (tolerancia
                 # fina) con el piloto: así no se acepta un nodo que se queda parado a
@@ -2236,7 +2326,11 @@ class Planificador:
                     txa = gx; tya = gy
                 alpha0 = math.atan2(tya - y, txa - x) - th
                 alpha0 = math.atan2(math.sin(alpha0), math.cos(alpha0))
-                if abs(alpha0) <= self.ang_tiro or (not con_ang_din and d_goal <= self.goal_tol * 1.5):
+                # Solo si NO va marcha atrás: el remate conduce hacia DELANTE y
+                # arrancarlo con v<0 invertiría el sentido de golpe (sin frenar).
+                # La llegada/inversión en retroceso va por sus propios conectores.
+                if v >= -self.v_tol and (abs(alpha0) <= self.ang_tiro
+                                         or (not con_ang_din and d_goal <= self.goal_tol * 1.5)):
                     n, poses = _k_tiro(x, y, th, v, k, gx, gy, gth, con_ang_din, ang_tol_din,
                                        L, dmax, self.ld_tiro,
                                        self.v_max_c, self.a_max, self.goal_tol_fin,
@@ -2271,7 +2365,10 @@ class Planificador:
                     and d_goal < backup_d):
                 ang_ok = True
                 if con_ang_din:
-                    ang_ok = abs(ang_norm(th - gth)) <= 1.5 * ang_tol_din
+                    tol_resp = 1.5 * ang_tol_din
+                    if tol_resp > ANG_MAX_SENTIDO:
+                        tol_resp = ANG_MAX_SENTIDO      # nunca aceptar sentido invertido
+                    ang_ok = abs(ang_norm(th - gth)) <= tol_resp
                 if ang_ok:
                     Ld = self._len + 2.0 * self.margen_din
                     Wd = self._wid + 2.0 * self.margen_din
@@ -2288,12 +2385,10 @@ class Planificador:
             # coche está cerca de la meta. Se prueba de forma espaciada para no
             # encarecer el caso normal. Si encuentra maniobra, cierra la ruta.
             #
-            # Se le pasa la velocidad ACTUAL 'v': la rama HACIA DELANTE la arrastra
-            # (enlaza el tramo de reorientación con el remate SIN parar), así que la
-            # maniobra puede dispararse con el coche AÚN CIRCULANDO y ya no obliga a
-            # frenar hasta 0 «sin sentido» antes de seguir de frente. Solo la rama
-            # de MARCHA ATRÁS exige partir parado, y de eso se encarga la propia
-            # _k_maniobra (descarta el retroceso si |v0| > v_tol).
+            # Se le pasa la velocidad ACTUAL 'v': el tramo en el MISMO sentido la
+            # arrastra (sin parar), y el que INVIERTE el sentido antepone su propio
+            # prefijo de frenado físico hasta v=0. Ningún caso exige llegar parado:
+            # la búsqueda ya no tiene motivo para detenerse «por si acaso».
             if (con_ang_din and d_goal <= self.dist_tiro
                     and expand > self.umbral_maniobra
                     and expand - self._exp_ult_maniobra >= self.paso_maniobra):
@@ -2347,6 +2442,18 @@ class Planificador:
                 ny = osub[ai, ns - 1, 1]
                 nth = osub[ai, ns - 1, 2]
                 nk = k + ns
+                # PROHIBICIÓN DURA: la búsqueda NO puede generar un nodo DETENIDO
+                # (|v|<v_tol) dentro de la zona de la meta si el rumbo NO coincide
+                # con el de llegada (sentido incluido). Así el coche NUNCA se para
+                # al pasar por la meta mal orientado —sigue de largo y reorienta en
+                # movimiento, o por su conector, que frena él mismo—. Solo puede
+                # llegar a pararse si YA está bien orientado, y esa parada es la
+                # definitiva (la que remata/aparca). Ningún conector necesita que
+                # la búsqueda se detenga antes, así que esto no bloquea maniobras.
+                if con_ang and abs(nv) < self.v_tol:
+                    if (math.hypot(nx - gx, ny - gy) <= self.dist_tiro
+                            and abs(ang_norm(nth - gth)) > ang_tol_din):
+                        continue
                 # COSTE = TIEMPO. Una ruta más larga acumula más pasos y sale peor
                 # por sí sola; no se penaliza girar salvo desempates ε.
                 ng = g + self.dt
@@ -2354,38 +2461,32 @@ class Planificador:
                     ng += 0.6 * self.dt               # marcha atrás: maniobra indeseada
                 if abs(nv) < 1e-3 and acc[ai] <= 0.0:
                     ng += 0.20 * self.dt              # pararse sin motivo cuesta tiempo
-                # ε: no PARARSE «sin sentido» en la zona de la meta. El
-                # heurístico (tiempo-a-meta) tiene un POZO sobre el punto final
-                # (h≈0), y con A* ponderado eso ATRAE a los nodos casi PARADOS
-                # —enseguida enlazan un remate o una maniobra—, de modo que la
-                # ruta se frena HASTA DETENERSE aunque LUEGO siga hacia ADELANTE,
-                # donde parar no aporta nada. El punto fino: NINGÚN conector
-                # necesita v<v_tol. El remate y la maniobra HACIA DELANTE
-                # arrastran la velocidad de entrada (no paran); la maniobra de
-                # MARCHA ATRÁS solo exige entrar con |v|≤v_tol y es ella misma la
-                # que pasa por v=0 para invertir el sentido. Por tanto un parón
-                # total (v≈0) en la BÚSQUEDA es siempre un artefacto del pozo del
-                # heurístico. Se encarece con firmeza bajar de v_tol cerca de la
-                # meta (sin mirar la curvatura: un parón no lo justifica ninguna
-                # curva, solo un cambio de sentido, que va por su conector): así
-                # la búsqueda llega «reduciendo la velocidad» hasta ~v_tol en vez
-                # de PARANDO, y el coche solo se detiene de verdad cuando de
-                # verdad va a ir marcha atrás (lo decide el conector, no el A*).
-                # Parón total artificial: SOLO se encarece cuando el nodo YA está
-                # encarado a la plaza y cerca (va a rematar) —el pozo del heurístico
-                # aún atrae a v≈0 ahí, y ningún conector necesita v<v_tol—. El caso
-                # de pasar de paso MAL encarado ya NO frena, porque el heurístico
-                # (arriba) le mantiene h alto y no lo atrae; no hace falta parche.
-                if con_ang and abs(nv) < self.v_tol:
+                if con_ang:
                     d_goal_next = math.hypot(nx - gx, ny - gy)
-                    if d_goal_next <= self.dist_tiro:
-                        s0 = min(0.62 * d_goal_next, 4.0 * L)
-                        a0 = ang_norm(math.atan2(
-                                gy - s0 * math.sin(gth) - ny,
-                                gx - s0 * math.cos(gth) - nx) - nth)
-                        if (abs(a0) <= self.ang_tiro
-                                and abs(ang_norm(nth - gth)) <= ang_tol_din):
-                            ng += 3.0 * self.dt * (self.v_tol - abs(nv)) / self.v_tol
+                    av_n = abs(nv)
+                    # PARÓN cerca de la meta: SIEMPRE artefacto del pozo del
+                    # heurístico. Ya NINGÚN conector necesita llegar parado —la
+                    # maniobra antepone su propio frenado antes de invertir el
+                    # sentido—, así que detenerse «por si luego hay que ir marcha
+                    # atrás» no aporta nada: se encarece SIN mirar el ángulo. El
+                    # coche que pasa recto junto a la meta sigue recto; si toca
+                    # invertir, el conector frena él mismo (decisión, no espera).
+                    if d_goal_next <= self.dist_tiro and av_n < self.v_tol:
+                        ng += 3.0 * self.dt * (self.v_tol - av_n) / self.v_tol
+                    # ENVOLVENTE DE APROXIMACIÓN (frenado progresivo de "etapa 1"):
+                    # llegar a la zona de maniobra (dist_tiro) ya a velocidad de
+                    # maniobra. Fuera de la zona la envolvente crece con la
+                    # parábola física v² = v_man² + 2·a·d_extra, así el descenso es
+                    # gradual, empieza donde toca según v y a_max, y NO depende
+                    # del ángulo. Evita entrar tan rápido que no pueda parar y
+                    # tenga que dar una vuelta para reintentar.
+                    v_man_c = V_MAN_FRAC * self.v_max_c
+                    d_ext = d_goal_next - self.dist_tiro
+                    if d_ext < 0.0:
+                        d_ext = 0.0
+                    v_env = math.sqrt(v_man_c * v_man_c + 2.0 * self.a_max * d_ext)
+                    if av_n > v_env:
+                        ng += 2.0 * self.dt * (av_n - v_env) / self.v_max_c
                 ng += 0.10 * self.dt * abs(delta) / dmax          # ε: prefiere ir recto
                 # ε: sin temblor de volante. Reforzado: mantener el MISMO ángulo
                 # de dirección a lo largo de la curva sale mucho más barato que
