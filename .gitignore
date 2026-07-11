@@ -222,3 +222,7 @@ __marimo__/
 **/.DS_Store
 .AppleDouble
 .LSOverride
+
+# Mapas generados localmente
+mapas/*
+!mapas/.gitkeep
