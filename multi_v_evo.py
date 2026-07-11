@@ -1783,7 +1783,7 @@ class Planificador:
         self.v_tol = 0.45
         self.ang_tol_meta = math.radians(5)    # tolerancia del ÁNGULO DE LLEGADA
         self.k_max = 1600
-        self.dist_tiro = 10.0         # por defecto; se ajusta en planificar al doble del lado mayor del vehículo
+        self.dist_tiro = 10.0         # por defecto; se ajusta en planificar al lado mayor del vehículo
         self.ang_tiro = math.radians(30)
         self.ld_tiro = 1.6            # lookahead del remate: acerca el conector al
         #                              óptimo tipo Dubins (arco al radio necesario +
@@ -2071,7 +2071,7 @@ class Planificador:
         final dentro de ang_tol_meta alrededor de ese ángulo."""
         self._len, self._wid = veh.length, veh.width
         self.goal_tol = min(veh.length, veh.width)
-        self.dist_tiro = 2.0 * max(veh.length, veh.width)
+        self.dist_tiro = 1.0 * max(veh.length, veh.width)
         self.diag = veh.diag
         L = veh.wheelbase
         dmax = veh.delta_max
@@ -3491,7 +3491,7 @@ class App:
                 "largo": round(largo, 2),
                 "ancho": round(ancho, 2),
                 "v_max": round(random.uniform(1.8, 3.2), 2),
-                "a_max": round(random.uniform(0.8, 1.4), 2),
+                "a_max": round(random.uniform(0.6, 1.1), 2),
                 "giro_max": round(random.uniform(28.0, 40.0), 1),
                 "grupo": random.randint(1, 2),
                 "prioridad": random.randint(1, 3),
