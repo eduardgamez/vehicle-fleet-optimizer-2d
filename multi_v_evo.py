@@ -104,7 +104,7 @@ from numba import njit
 #     volante y cierra el radio. A más valor, mayor es esa ganancia.
 # 0.35 casi no frenaba en curva ni ganaba giro; 0.55 frenaba demasiado. 0.45 es
 # el punto medio. Súbelo si quieres más de ambos efectos; bájalo si frena de más.
-STEER_SPEED_C = 0.45
+STEER_SPEED_C = 0.5
 
 
 # Velocidad de crucero de la MANIOBRA FINAL, como fracción de la v_max del
@@ -2686,6 +2686,44 @@ def generar_ordenes(vehiculos, indices, modo, max_cand=24):
     return ordenes
 
 
+def total_combinaciones(especs, modo):
+    """Número TEÓRICO de órdenes de planificación distintos que un modo PODRÍA
+    llegar a explorar, SIN el tope de max_cand (es el «de X» que se muestra junto
+    a «Órdenes a explorar»):
+
+      · "secuencial"  → 1  (un único orden determinista, no explora).
+      · "global"      → n!  (todos permutan entre sí).
+      · "prioridades" → producto de los factoriales del tamaño de cada bucket
+                        (grupo, prioridad): dentro de cada bucket se permuta, pero
+                        los buckets van en orden fijo.
+
+    'especs' es una lista de diccionarios (con claves opcionales 'grupo' y
+    'prioridad', por defecto 1) o de objetos con esos atributos. Devuelve 0 si la
+    lista está vacía."""
+    n = len(especs)
+    if n == 0:
+        return 0
+    if modo == "secuencial":
+        return 1
+    if modo == "global":
+        return math.factorial(n)
+
+    # "prioridades"/grupos: agrupa por (grupo, prioridad) y multiplica factoriales.
+    def _clave(e):
+        if isinstance(e, dict):
+            return (e.get("grupo", 1), e.get("prioridad", 1))
+        return (getattr(e, "grupo", 1), getattr(e, "prioridad", 1))
+
+    buckets = {}
+    for e in especs:
+        k = _clave(e)
+        buckets[k] = buckets.get(k, 0) + 1
+    total = 1
+    for tam in buckets.values():
+        total *= math.factorial(tam)
+    return total
+
+
 def bloqueos_metas(vehiculos, indices, excepto, pose0=None):
     """OBB cuadrados en las metas ajenas, para que nadie planifique aparcar
     donde otro vehículo debe aparcar.
@@ -3165,7 +3203,19 @@ class App:
                             value=val).grid(row=fila[0], column=0,
                                             columnspan=2, sticky="w")
             fila[0] += 1
-        self.e_cand = self._campo(panel, fila, "Órdenes a explorar (máx):", "12")
+        # "Órdenes a explorar (máx)" + total de combinaciones posibles ("de X").
+        # La casilla se desplaza a la izquierda y a su derecha, FUERA de ella, se
+        # muestra el número teórico de órdenes que el modo podría llegar a probar.
+        ttk.Label(panel, text="Órdenes a explorar (máx):").grid(
+            row=fila[0], column=0, sticky="w", pady=1)
+        sub = ttk.Frame(panel)
+        sub.grid(row=fila[0], column=1, sticky="e", pady=1)
+        self.e_cand = ttk.Entry(sub, width=5)
+        self.e_cand.insert(0, "12")
+        self.e_cand.pack(side="left")
+        self.lbl_combos = ttk.Label(sub, text="de —")
+        self.lbl_combos.pack(side="left", padx=(4, 0))
+        fila[0] += 1
 
         sep()
         # Botón principal destacado.
@@ -3215,6 +3265,18 @@ class App:
                              font=("Menlo", 10), undo=True)
         self.texto.grid(row=1, column=0, sticky="ew")
         self.texto.insert("1.0", TEXTO_EJEMPLO)
+
+        # El total de combinaciones («de X») se recalcula al cambiar de modo de
+        # optimización, al editar los vehículos y al (re)generarlos. Cambiar el
+        # modo a ALEATORIO o el nº de vehículos regenera las instrucciones para
+        # que las preferencias queden definidas y el total se pueda calcular.
+        self._ultimo_num = self.e_num.get()
+        self.opt.trace_add("write", self._actualizar_combos)
+        self.modo.trace_add("write", self._modo_cambia)
+        self.e_num.bind("<Return>", self._num_cambia)
+        self.e_num.bind("<FocusOut>", self._num_cambia)
+        self.texto.bind("<KeyRelease>", self._actualizar_combos)
+        self._actualizar_combos()
 
         self.estado = tk.StringVar(value="Listo. Ajusta parámetros y genera vehículos.")
         ttk.Label(cont, textvariable=self.estado, relief="sunken",
@@ -3286,6 +3348,41 @@ class App:
             return max(1, min(120, int(self.e_cand.get())))
         except ValueError:
             return 12
+
+    def _actualizar_combos(self, *_):
+        """Recalcula el total de órdenes posibles («de X») a partir de las
+        instrucciones actuales de la caja de texto y del modo de optimización
+        elegido. Si el texto aún no es válido, muestra «de —»."""
+        if not hasattr(self, "lbl_combos"):
+            return
+        try:
+            especs = parsear_especificaciones(self.texto.get("1.0", "end"))
+            total = total_combinaciones(especs, self.opt.get())
+            self.lbl_combos.config(text=f"de {total:,}")
+        except Exception:
+            self.lbl_combos.config(text="de —")
+
+    def _modo_cambia(self, *_):
+        """Al pasar a ALEATORIO se regeneran las instrucciones (para que las
+        preferencias queden definidas y el total sea calculable); en manual solo
+        se refresca el total con lo que ya hay en el texto."""
+        if self.modo.get() == "aleatorio":
+            self._seguro(self.generar_posiciones)()
+        else:
+            self._actualizar_combos()
+
+    def _num_cambia(self, *_):
+        """Cambiar el nº de vehículos (en modo aleatorio) regenera las
+        instrucciones; solo si el valor realmente cambió, para no rehacer la
+        flota al mover el foco sin editar."""
+        actual = self.e_num.get()
+        if actual == getattr(self, "_ultimo_num", None):
+            return
+        self._ultimo_num = actual
+        if self.modo.get() == "aleatorio":
+            self._seguro(self.generar_posiciones)()
+        else:
+            self._actualizar_combos()
 
     # ------------------------------- mapa -------------------------------- #
     def _actualizar_densidad(self):
@@ -3417,6 +3514,7 @@ class App:
                 return
             self.estado.set(f"{len(self.vehiculos)} vehículos manuales "
                             "cargados. Pulsa «Calcular y simular».")
+            self._actualizar_combos()
             self._dibujar_estatico()
             return
 
@@ -3440,6 +3538,8 @@ class App:
             return
         self.estado.set(f"{n} vehículos aleatorios generados en el texto "
                         "(edítalos si quieres). Pulsa «Calcular y simular».")
+        self._ultimo_num = self.e_num.get()
+        self._actualizar_combos()
         self._dibujar_estatico()
 
     def _muestrear(self, length, width, otros, sep):
@@ -3490,8 +3590,8 @@ class App:
                                    if thm is not None else "libre"),
                 "largo": round(largo, 2),
                 "ancho": round(ancho, 2),
-                "v_max": round(random.uniform(1.8, 3.2), 2),
-                "a_max": round(random.uniform(0.6, 1.1), 2),
+                "v_max": round(random.uniform(1.8, 3), 2),
+                "a_max": round(random.uniform(0.6, 1), 2),
                 "giro_max": round(random.uniform(28.0, 40.0), 1),
                 "grupo": random.randint(1, 2),
                 "prioridad": random.randint(1, 3),

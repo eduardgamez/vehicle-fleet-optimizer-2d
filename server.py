@@ -484,46 +484,47 @@ def _ruta_real(veh, traj):
     return math.hypot(x0 - veh.meta[0], y0 - veh.meta[1]) <= 1.6
 
 
-def _ejecutar_planificacion(env, vehiculos, indices, base, calidad, modo_opt, max_cand,
-                            reubicable=False, inicios=None, progreso=None):
-    """Planificación SECUENCIAL cooperativa (igual que el escritorio en modo
-    secuencial): un ÚNICO orden de prioridad, se planifica vehículo a vehículo y
-    cada uno se RESERVA como obstáculo (móvil si logra ruta, estático si no)
-    antes de pasar al siguiente. Presupuesto por vehículo: SOLO nodos
-    (CAP_NODOS, memoria); sin límite de tiempo, igual que la relajación del
-    ángulo de llegada, que se mide en nodos-en-meta, no en segundos. Si un
-    vehículo no llega, queda aparcado y bloquea a los de detrás (en modo
-    aleatorio se intenta reubicarlo antes con extremos nuevos).
+# Presupuesto de TIEMPO por vehículo al COMPARAR órdenes candidatos (fase de
+# exploración de "global"/"grupos"). El orden GANADOR se replanifica luego SIN
+# este límite (solo el tope de nodos): la exploración sirve para ELEGIR qué
+# orden comprometer, no para producir la ruta definitiva. Igual que el
+# escritorio (mve.PLAZO_VEH_CAND).
+PLAZO_VEH_CAND = 5.0
 
-    'progreso' (opcional): callback(texto) para informar del avance en vivo
-    (vehículo actual y nodos explorados), usado por la ejecución en segundo
-    plano para mover la barra de progreso del navegador."""
-    pl = mve.Planificador(env)
-    pl.configurar_calidad(calidad)
 
-    # Un solo orden: el primer candidato del modo elegido (para "secuencial" es
-    # el orden de prioridad; para los demás, un orden inicial razonable).
-    orden = list(mve.generar_ordenes(vehiculos, indices, modo_opt, max_cand)[0])
+def _planificar_una_pasada(env, vehiculos, orden, base, inicios, pl,
+                           reubicable, progreso, etiqueta="", deadline_dur=None):
+    """Una pasada cooperativa sobre 'orden' (índices): planifica vehículo a
+    vehículo y RESERVA cada uno como obstáculo (móvil si logra ruta, estático si
+    no) antes del siguiente. Devuelve (trays, motivos, fallos, coste), donde
+    'coste' es el tiempo total de flota (suma de duraciones) más una penalización
+    por cada vehículo sin ruta, para poder comparar órdenes entre sí.
 
+    'deadline_dur' (s/vehículo), si se indica, acota el tiempo de cada búsqueda
+    —se usa al comparar candidatos—; con None solo manda el tope de nodos.
+    'reubicable': en modo aleatorio, a un vehículo sin salida se le buscan
+    extremos nuevos (solo en la pasada DEFINITIVA, no al comparar)."""
+    import time as _t
     reservas = base.copia()
     trays = {}
     motivos = {}
-    import time as _t
+    coste = 0.0
+    pref = (etiqueta + " · ") if etiqueta else ""
     for pos, i in enumerate(orden):
         veh = vehiculos[i]
         ini = inicios.get(i) if inicios else None
         if CAP_NODOS is not None:
             pl.max_nodos = CAP_NODOS                  # presupuesto de nodos (memoria)
         pl.max_exp = 20_000_000                   # las expansiones no son el freno
-        pl.deadline = None                        # sin límite de tiempo: solo nodos
+        pl.deadline = (_t.perf_counter() + deadline_dur) if deadline_dur else None
         # pose0: un bloqueo de meta ajena que SOLAPE el arranque del vehículo
         # se omite; si no, nace atrapado y da "sin_ruta" al instante.
         pl.bloqueos = mve.bloqueos_metas(
             vehiculos, orden, excepto=i,
             pose0=(ini if ini is not None else veh.inicio))
         if progreso is not None:
-            def _tick(expand, _p=pos, _vid=veh.vid, _n=len(orden)):
-                progreso(f"Planificando vehículo {_p + 1}/{_n} (id {_vid}) · "
+            def _tick(expand, _p=pos, _vid=veh.vid, _n=len(orden), _pf=pref):
+                progreso(f"{_pf}Planificando vehículo {_p + 1}/{_n} (id {_vid}) · "
                          f"{expand:,} nodos explorados")
             pl.tick = _tick
         else:
@@ -535,13 +536,13 @@ def _ejecutar_planificacion(env, vehiculos, indices, base, calidad, modo_opt, ma
         motivos[i] = pl.motivo
         ok = _ruta_real(veh, traj)
         # REUBICACIÓN (modo aleatorio, como el escritorio): si el vehículo no
-        # tiene salida donde nació, se le buscan extremos nuevos. Antes esta
-        # función existía (_reubicar) pero nunca se llamaba.
+        # tiene salida donde nació, se le buscan extremos nuevos.
         intentos = 0
         while (not ok and reubicable and inicios is None
                and pl.motivo == "sin_ruta" and intentos < 12):
             if not _reubicar(env, veh, vehiculos):
                 break
+            pl.deadline = (_t.perf_counter() + deadline_dur) if deadline_dur else None
             pl.bloqueos = mve.bloqueos_metas(vehiculos, orden, excepto=i,
                                              pose0=veh.inicio)
             traj = pl.planificar(veh, reservas)
@@ -553,7 +554,7 @@ def _ejecutar_planificacion(env, vehiculos, indices, base, calidad, modo_opt, ma
         #   sin_ruta   → encajonado: algo (otro vehículo/obstáculo) lo bloquea
         #   techo_nodos→ llegó al presupuesto CAP_NODOS (subirlo o revisar mapa)
         #   limite     → agotó expansiones
-        print(f"[PLAN] veh id={veh.vid} pos={pos+1}/{len(orden)} "
+        print(f"[PLAN] {pref}veh id={veh.vid} pos={pos+1}/{len(orden)} "
               f"{'OK' if ok else 'SIN_RUTA'} motivo={pl.motivo} "
               f"nodos_creados={pl.nodos} expandidos={pl.expandidos} "
               f"ang_llegada={'no' if veh.meta_th is None else 'si'} "
@@ -562,14 +563,72 @@ def _ejecutar_planificacion(env, vehiculos, indices, base, calidad, modo_opt, ma
         if ok:
             trays[i] = traj
             reservas.add(traj, veh.length, veh.width)
+            coste += (len(traj) - 1) * mve.DT
         else:
             # No llegó: queda APARCADO en su salida y sigue contando como
             # obstáculo (reserva estática) para los vehículos que van detrás.
             trays[i] = None
             px, py, pth = ini if ini is not None else veh.inicio
             reservas.add([(px, py, pth)], veh.length, veh.width)
+            coste += mve.PENAL_FALLO
     pl.tick = None
+    fallos = sum(1 for i in orden if trays[i] is None)
+    return trays, motivos, fallos, coste
 
+
+def _ejecutar_planificacion(env, vehiculos, indices, base, calidad, modo_opt, max_cand,
+                            reubicable=False, inicios=None, progreso=None):
+    """Planificación cooperativa de la flota (igual que el escritorio).
+
+    Genera los ÓRDENES candidatos según el modo ("secuencial" da uno solo;
+    "global" y "grupos" dan varios, hasta max_cand) y, si hay más de uno, los
+    EXPLORA: cada orden se evalúa con una pasada cooperativa completa y gana el
+    de MENOS fallos y, a igualdad, MENOR tiempo total de flota. El ganador se
+    replanifica una última vez sin límite de tiempo (solo nodos) para producir
+    la ruta definitiva. Cada vehículo se RESERVA como obstáculo (móvil si logra
+    ruta, estático si no) antes del siguiente; si no llega, bloquea a los de
+    detrás (en modo aleatorio se intenta reubicarlo con extremos nuevos).
+
+    'progreso' (opcional): callback(texto) para informar del avance en vivo
+    (orden en curso, vehículo actual y nodos explorados), usado por la ejecución
+    en segundo plano para mover la barra de progreso del navegador."""
+    pl = mve.Planificador(env)
+    pl.configurar_calidad(calidad)
+
+    ordenes = mve.generar_ordenes(vehiculos, indices, modo_opt, max_cand)
+
+    # Un solo orden (secuencial, o modos sin nada que permutar): una sola pasada,
+    # sin límite de tiempo (solo el tope de nodos), como hasta ahora.
+    if len(ordenes) <= 1:
+        trays, motivos, _, _ = _planificar_una_pasada(
+            env, vehiculos, list(ordenes[0]), base, inicios, pl,
+            reubicable, progreso)
+        return trays, motivos
+
+    # EXPLORACIÓN: cada orden candidato se evalúa con una pasada cooperativa SIN
+    # reubicación (determinista y comparable) y acotada en tiempo por vehículo,
+    # para no dispararse con muchos órdenes.
+    total = len(ordenes)
+    mejor = None                             # (fallos, coste, orden)
+    for oi, orden in enumerate(ordenes):
+        etiqueta = f"Orden {oi + 1}/{total}"
+        if progreso is not None:
+            progreso(f"Explorando {etiqueta}…")
+        _, _, fallos, coste = _planificar_una_pasada(
+            env, vehiculos, list(orden), base, inicios, pl,
+            reubicable=False, progreso=progreso, etiqueta=etiqueta,
+            deadline_dur=PLAZO_VEH_CAND)
+        if mejor is None or (fallos, coste) < (mejor[0], mejor[1]):
+            mejor = (fallos, coste, list(orden))
+        print(f"[OPT] {etiqueta} fallos={fallos} coste={coste:.2f}", flush=True)
+
+    # El orden GANADOR se replanifica SIN límite de tiempo (solo nodos) y CON
+    # reubicación, para producir la ruta definitiva.
+    if progreso is not None:
+        progreso("Planificando el mejor orden encontrado…")
+    trays, motivos, _, _ = _planificar_una_pasada(
+        env, vehiculos, mejor[2], base, inicios, pl,
+        reubicable, progreso, etiqueta="Mejor orden")
     return trays, motivos
 
 @app.route("/api/simular", methods=["POST"])

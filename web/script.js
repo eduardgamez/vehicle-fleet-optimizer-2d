@@ -48,11 +48,47 @@ document.addEventListener('DOMContentLoaded', () => {
   const numVehiculosInput = document.getElementById('num-vehiculos');
   const densidadInput = document.getElementById('densidad-obs');
   const maxCandInput = document.getElementById('max-cand');
+  const candTotalEl = document.getElementById('cand-total');
   const vehiculosInput = document.getElementById('vehiculos-input');
   const statusText = document.getElementById('status-text');
   const statusSpinner = document.getElementById('status-spinner');
   const setLoading = (loading) => {
     if (statusSpinner) statusSpinner.hidden = !loading;
+  };
+
+  // --- Total de combinaciones («de X») ---
+  // Número TEÓRICO de órdenes que el modo podría llegar a probar (sin el tope de
+  // «Órdenes a explorar»): global = n!; grupos = producto de factoriales del
+  // tamaño de cada bucket (grupo, prioridad); secuencial = 1. Se calcula a partir
+  // de los vehículos ya construidos (llevan grupo/prioridad), que es donde las
+  // preferencias quedan definidas — igual en aleatorio (tras generarlos) que en
+  // manual (tras insertarlos).
+  const factorial = (n) => {
+    let r = 1;
+    for (let i = 2; i <= n; i++) r *= i;
+    return r;
+  };
+
+  const totalCombos = (vehiculos, modo) => {
+    const n = vehiculos.length;
+    if (n === 0) return null;
+    if (modo === 'secuencial') return 1;
+    if (modo === 'global') return factorial(n);
+    // 'prioridades' (grupos): producto de factoriales por bucket (grupo|prioridad).
+    const buckets = {};
+    vehiculos.forEach((v) => {
+      const k = `${v.grupo ?? 1}|${v.prioridad ?? 1}`;
+      buckets[k] = (buckets[k] || 0) + 1;
+    });
+    return Object.values(buckets).reduce((acc, s) => acc * factorial(s), 1);
+  };
+
+  const updateCombos = () => {
+    if (!candTotalEl) return;
+    const total = totalCombos(state.vehiculos || [], state.optim);
+    candTotalEl.textContent = total === null
+      ? 'de —'
+      : `de ${total.toLocaleString('es-ES')}`;
   };
 
   const canvas = document.getElementById('main-canvas');
@@ -76,9 +112,11 @@ document.addEventListener('DOMContentLoaded', () => {
     const val = Math.round(1 + pct * 4);
     state.quality = val;
     if (qualityVal) qualityVal.textContent = val;
-    const pctString = ((val - 1) / 4 * 100) + '%';
-    if (qualityFill) qualityFill.style.width = pctString;
-    if (qualityThumb) qualityThumb.style.left = pctString;
+    const frac = (val - 1) / 4;
+    if (qualityFill) qualityFill.style.width = (frac * 100) + '%';
+    if (qualityThumb) {
+      qualityThumb.style.left = `calc((100% - var(--thumb-size)) * ${frac})`;
+    }
   };
 
   const handlePointer = (e) => {
@@ -102,6 +140,14 @@ document.addEventListener('DOMContentLoaded', () => {
       if (thumbSource) {
         thumbSource.style.left = `calc(${index} * 100% / ${sourceButtons.length} + 2px)`;
       }
+      // Al pasar a ALEATORIO se generan las instrucciones (rellena la caja y
+      // define las preferencias) para que el total sea calculable; en manual el
+      // total refleja los vehículos ya insertados.
+      if (state.source === 'aleatorio') {
+        generarVehiculos();
+      } else {
+        updateCombos();
+      }
     });
   });
 
@@ -114,6 +160,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (thumbOptim) {
         thumbOptim.style.left = `calc(${index} * 100% / ${optimButtons.length} + 2px)`;
       }
+      updateCombos();          // el total depende del modo elegido
     });
   });
 
@@ -349,6 +396,7 @@ document.addEventListener('DOMContentLoaded', () => {
           vehiculosInput.value = data.texto;
         }
         statusText.textContent = "Listo. Mapa cargado. Puedes insertar o generar vehículos.";
+        updateCombos();
         setupCanvas();
       }
     } catch (err) {
@@ -408,6 +456,7 @@ document.addEventListener('DOMContentLoaded', () => {
         : '';
       statusText.textContent =
         `${state.vehiculos.length} vehículos cargados/generados. Pulsa «Simular».${sufijo}`;
+      updateCombos();
       drawScene();
     } catch (err) {
       statusText.textContent = `Error de red: ${err.message}`;
@@ -415,6 +464,13 @@ document.addEventListener('DOMContentLoaded', () => {
   };
 
   btnInsertar?.addEventListener('click', generarVehiculos);
+
+  // Cambiar el nº de vehículos en modo ALEATORIO regenera las instrucciones (y,
+  // con ellas, el total de combinaciones). 'change' salta al perder foco o con
+  // Enter, no en cada tecla.
+  numVehiculosInput?.addEventListener('change', () => {
+    if (state.source === 'aleatorio') generarVehiculos();
+  });
 
   // --- Botones de Mapa ---
   btnMapaAleatorio?.addEventListener('click', async () => {
@@ -601,6 +657,7 @@ document.addEventListener('DOMContentLoaded', () => {
       state.vehiculos = data.vehiculos || state.vehiculos;
       state.trayectorias = data.trayectorias || [];
       state.frames = data.frames || [];
+      updateCombos();
       statusText.textContent = "¡Simulación de nuevas rutas en curso!";
       iniciarReproduccion(true);
     } catch (err) {

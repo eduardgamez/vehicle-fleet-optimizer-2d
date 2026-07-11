@@ -315,6 +315,20 @@ input.text-input {
   outline: none;
 }
 
+/* Casilla «Órdenes a explorar» + total de combinaciones posibles ("de X").
+   La casilla se desplaza a la izquierda y el total queda a su derecha, fuera. */
+.cand-wrap {
+  display: flex;
+  align-items: center;
+  gap: calc(6 * 100cqh / 800);
+}
+
+.cand-total {
+  font-size: calc(11.5 * 100cqh / 800);
+  color: var(--text);
+  white-space: nowrap;
+}
+
 .slider-container {
   display: flex;
   flex-direction: column;
@@ -354,10 +368,10 @@ input.text-input {
 }
 
 .slider-thumb {
+  --thumb-size: calc(20 * 100cqh / 800);
   position: absolute;
-  width: calc(20 * 100cqh / 800);
-  height: calc(20 * 100cqh / 800);
-  margin-left: -calc(10 * 100cqh / 800);
+  width: var(--thumb-size);
+  height: var(--thumb-size);
   background: #ffffff;
   border-radius: 50%;
   box-shadow: 0 0.5px calc(2 * 100cqh / 800) rgba(0,0,0,.12), 0 calc(3 * 100cqh / 800) calc(8 * 100cqh / 800) rgba(0,0,0,.2);
