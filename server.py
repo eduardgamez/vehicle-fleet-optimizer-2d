@@ -606,21 +606,41 @@ def _ejecutar_planificacion(env, vehiculos, indices, base, calidad, modo_opt, ma
         return trays, motivos
 
     # EXPLORACIÓN: cada orden candidato se evalúa con una pasada cooperativa SIN
-    # reubicación (determinista y comparable) y acotada en tiempo por vehículo,
-    # para no dispararse con muchos órdenes.
+    # reubicación (determinista y comparable). Igual que el escritorio, con varios
+    # órdenes y varios núcleos se evalúan EN PARALELO por HORNADAS (parada al 95 %
+    # de llegadas acumuladas); con un solo núcleo, o si el paralelo falla, se cae
+    # al bucle secuencial de siempre.
     total = len(ordenes)
     mejor = None                             # (fallos, coste, orden)
-    for oi, orden in enumerate(ordenes):
-        etiqueta = f"Orden {oi + 1}/{total}"
-        if progreso is not None:
-            progreso(f"Explorando {etiqueta}…")
-        _, _, fallos, coste = _planificar_una_pasada(
-            env, vehiculos, list(orden), base, inicios, pl,
-            reubicable=False, progreso=progreso, etiqueta=etiqueta,
-            deadline_dur=PLAZO_VEH_CAND)
-        if mejor is None or (fallos, coste) < (mejor[0], mejor[1]):
-            mejor = (fallos, coste, list(orden))
-        print(f"[OPT] {etiqueta} fallos={fallos} coste={coste:.2f}", flush=True)
+    cal_int = int(round(float(calidad)))
+    if mve.nucleos_disponibles() >= 2 and len(indices) >= 3:
+        try:
+            if progreso is not None:
+                progreso(f"Explorando {total} órdenes en paralelo (hornadas)…")
+            res = mve.evaluar_ordenes_hornadas(
+                env, vehiculos, list(ordenes), base, inicios, cal_int,
+                max_exp=None, progreso=progreso, sigue_vivo=None)
+            if res is not None:
+                mejor = (res[0], res[1], list(res[4]))
+                print(f"[OPT] paralelo fallos={res[0]} coste={res[1]:.2f} "
+                      f"orden={[vehiculos[i].vid for i in res[4]]}", flush=True)
+        except Exception as e:  # noqa: BLE001
+            print(f"[OPT] paralelo falló ({type(e).__name__}: {e}); "
+                  "se usa el bucle secuencial", flush=True)
+            mejor = None
+
+    if mejor is None:                        # secuencial (1 núcleo o retroceso)
+        for oi, orden in enumerate(ordenes):
+            etiqueta = f"Orden {oi + 1}/{total}"
+            if progreso is not None:
+                progreso(f"Explorando {etiqueta}…")
+            _, _, fallos, coste = _planificar_una_pasada(
+                env, vehiculos, list(orden), base, inicios, pl,
+                reubicable=False, progreso=progreso, etiqueta=etiqueta,
+                deadline_dur=PLAZO_VEH_CAND)
+            if mejor is None or (fallos, coste) < (mejor[0], mejor[1]):
+                mejor = (fallos, coste, list(orden))
+            print(f"[OPT] {etiqueta} fallos={fallos} coste={coste:.2f}", flush=True)
 
     # El orden GANADOR se replanifica SIN límite de tiempo (solo nodos) y CON
     # reubicación, para producir la ruta definitiva.

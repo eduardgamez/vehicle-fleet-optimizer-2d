@@ -40,7 +40,7 @@ Abre tu navegador en `http://localhost:5000` para acceder a la interfaz web inte
 El repositorio se compone de los siguientes archivos y carpetas:
 
 ### Núcleo de simulación
-- **`multi_v_evo.py`** — Simulador principal y aplicación de escritorio con interfaz gráfica en Tkinter. Implementa la cinemática realista (modelo de bicicleta), planificación en espacio continuo con **Hybrid A\*** cooperativo y coordinación espacio-tiempo, detección exacta de colisiones (OBB/SAT), optimización global y por grupos de prioridad, ángulos de llegada, importación/exportación de mapas y compilación JIT de alto rendimiento con **Numba**.
+- **`multi_v_evo.py`** — Simulador principal y aplicación de escritorio (Tkinter). Contiene todo el motor: física de bicicleta, planificación **Hybrid A\*** cooperativa con coordinación espacio-tiempo, colisiones exactas (OBB/SAT), optimización de flota en paralelo, ángulos de llegada, mapas desde imagen y compilación JIT con **Numba**.
 - **`multi_vehiculo.py`** — Versión reducida y ligera del simulador de escritorio. Contiene el motor de física y planificación Hybrid A*, pero omite funciones avanzadas como importar mapas desde imágenes, modos de optimización por prioridades o ángulos de llegada personalizados.
 
 ### Servidor e interfaz web (`web/`)
@@ -70,6 +70,11 @@ El repositorio se compone de los siguientes archivos y carpetas:
   destino, guiada por un campo de distancias que ya conoce los obstáculos.
 - La coordinación es **espacio-tiempo**: cuando un vehículo ya tiene ruta, los
   demás la ven como un obstáculo móvil y la esquivan (o esperan).
+- La búsqueda del mejor orden se **reparte entre todos los núcleos**: los órdenes
+  candidatos se evalúan a la vez en **hornadas** de tantos como núcleos. Cada
+  hornada se corta en cuanto ha llegado el **~95 %** de los vehículos (contando
+  los de hornadas previas), descartando a los rezagados en lugar de esperar a los
+  casos difíciles. Tanto el escritorio como el servidor web usan este mecanismo.
 - Las colisiones se comprueban con rectángulos orientados reales (SAT), no con
   círculos aproximados.
 - El núcleo numérico se compila a **código nativo con Numba** al arrancar, así
@@ -84,8 +89,9 @@ permite elegir cómo se decide ese orden:
 
 - **Global** — el programa prueba muchos órdenes distintos (todas las
   permutaciones si hay pocos vehículos; órdenes heurísticos y barajados si hay
-  muchos) y se queda con la solución con **menos fallos y menor tiempo total de
-  la flota**. El campo «Órdenes a explorar» limita cuántos candidatos prueba.
+  muchos), los evalúa **en paralelo por hornadas** (ver arriba) y se queda con la
+  solución con **menos fallos y, a igualdad, menor tiempo total de la flota**. El
+  campo «Órdenes a explorar» limita cuántos candidatos prueba.
 - **Prioridades personalizadas** — cada vehículo lleva dos números en la
   entrada de texto: su `grupo` de prioridad y su `prioridad` dentro del grupo.
   - Los **grupos** se resuelven en orden ascendente (grupo 1 antes que grupo 2,
@@ -95,10 +101,8 @@ permite elegir cómo se decide ese orden:
     **globalmente** entre sí (sin orden impuesto). El número es local al grupo,
     así que puede repetirse en grupos distintos.
 
-  Así se cubren los dos casos típicos: «este grupo de coches tiene más
-  prioridad pero es igual entre ellos» (mismo grupo, misma prioridad) y «estos
-  coches van con prioridad máxima y en este orden» (mismo grupo, prioridades
-  1, 2, 3…).
+  Así cubre tanto «este grupo es más prioritario pero igual entre sí» (misma
+  prioridad) como «estos van en este orden exacto» (prioridades 1, 2, 3…).
 - **Secuencial** — un único orden determinista, sin explorar combinaciones: se
   planifica primero el grupo prioritario (menor número de `grupo`) y, dentro de
   cada grupo y prioridad, según la posición en la lista. Es el modo más rápido y

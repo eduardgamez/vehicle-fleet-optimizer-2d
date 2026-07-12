@@ -2618,7 +2618,18 @@ def warmup():
 #                     con todos la misma prioridad va «en bloque pero igual entre
 #                     sí», y con prioridades distintas va «en ese orden». El número
 #                     de prioridad es local al grupo: puede repetirse entre grupos.
-PENAL_FALLO = 1.0e6     # coste ficticio de un vehículo sin ruta al comparar órdenes
+# PARADA POR HORNADAS: al explorar órdenes en paralelo, en vez de cortar cada
+# vehículo por un plazo de tiempo (que causaba fallos «por reloj»), se les deja
+# buscar hasta su tope de nodos y se procesan los órdenes en HORNADAS de tantos
+# como núcleos (todas a la vez). Un contador ACUMULADO cuenta los vehículos que
+# han LLEGADO sumando todas las hornadas vistas. Tras despachar k hornadas de n
+# órdenes con m vehículos cada uno, el umbral es FRAC · k · n · m; en cuanto el
+# acumulado lo alcanza, se corta la hornada en curso (sus vehículos aún sin
+# planificar cuentan como fallo) y se pasa a la siguiente. Al correr una hornada
+# entera a la vez (tamaño = núcleos), el umbral siempre es alcanzable dentro de
+# ella: no hay órdenes en cola «sin contar» como cuando había más órdenes que
+# núcleos. Así se reduce el fallo por falta de tiempo sin explorar eternamente.
+FRAC_PARADA_GLOBAL = 0.95
 
 
 def _ordenes_de_grupo(idxs, vehiculos, max_perm):
@@ -2759,8 +2770,19 @@ def bloqueos_metas(vehiculos, indices, excepto, pose0=None):
     return bloq
 
 
+def _cuenta_arribo(arribos):
+    """Suma un vehículo LLEGADO al contador ACUMULADO compartido entre procesos.
+    Quién decide la parada (comparar con el umbral de la hornada) es el proceso
+    principal, no el worker."""
+    if arribos is None:
+        return
+    with arribos.get_lock():
+        arribos.value += 1
+
+
 def planificar_orden(planificador, vehiculos, orden, reservas_base,
-                     inicios=None, tick_veh=None, deadline_dur=None):
+                     inicios=None, tick_veh=None, deadline_dur=None,
+                     arribos=None, parar=None):
     """Planifica cooperativamente los vehículos de 'orden' (índices) sobre las
     reservas base (p. ej. vehículos aparcados de misiones anteriores).
 
@@ -2776,14 +2798,29 @@ def planificar_orden(planificador, vehiculos, orden, reservas_base,
     síntoma es que, con varios vehículos, solo los primeros consiguen ruta y
     el resto se queda "aparcado" aunque exista solución.
 
+    'arribos'/'parar' implementan la PARADA POR HORNADAS (ver FRAC_PARADA_GLOBAL):
+    'arribos' es un contador ACUMULADO de vehículos llegados que este orden va
+    sumando; 'parar' es la bandera que el proceso principal pone a 1 al alcanzar
+    el umbral de la hornada. Con 'parar' a 1, los vehículos que aún no se hayan
+    planificado en este orden cuentan como fallo (no se les llega a buscar ruta).
+
     Devuelve (trayectorias, motivos, coste): dicts idx → traj / motivo, y el
-    coste total de flota (suma de duraciones + penalización por fallo)."""
+    coste total de flota (suma de duraciones REALES de los vehículos que
+    llegaron). Los fallos NO se penalizan en el coste: la selección ordena por
+    nº de fallos primero y el coste solo desempata entre órdenes con los
+    mismos fallos, así que 'coste' es tiempo real puro."""
     reservas = reservas_base.copia()
     trays = {}
     motivos = {}
     coste = 0.0
     for pos, idx in enumerate(orden):
         veh = vehiculos[idx]
+        # Parada global: si otro proceso ya alcanzó el 90 % de llegadas, los
+        # vehículos que quedan por planificar en este orden cuentan como fallo.
+        if parar is not None and parar.value:
+            trays[idx] = None
+            motivos[idx] = "parada_global"
+            continue
         if tick_veh is not None:
             tick_veh(pos, idx)
         ini = inicios.get(idx) if inicios else None
@@ -2798,12 +2835,13 @@ def planificar_orden(planificador, vehiculos, orden, reservas_base,
             trays[idx] = traj
             reservas.add(traj, veh.length, veh.width)
             coste += (len(traj) - 1) * DT
+            _cuenta_arribo(arribos)
         elif traj:
             trays[idx] = [traj[0], traj[0]]
             reservas.add(trays[idx], veh.length, veh.width)
+            _cuenta_arribo(arribos)
         else:
             trays[idx] = None
-            coste += PENAL_FALLO
     return trays, motivos, coste
 
 
@@ -2827,14 +2865,26 @@ def nucleos_disponibles():
         return max(1, os.cpu_count() or 1)
 
 
+def _nodos_corto(n):
+    """Formato compacto de un recuento de nodos para la barra de estado, para que
+    quepan todos los núcleos: 1234→'1.2k', 45000→'45k', 3400000→'3.4M'."""
+    if n < 1000:
+        return str(n)
+    if n < 999_500:
+        return f"{n / 1000:.1f}k" if n < 9950 else f"{n / 1000:.0f}k"
+    return f"{n / 1_000_000:.1f}M" if n < 9_950_000 else f"{n / 1_000_000:.0f}M"
+
+
 # Estado propio de cada proceso worker: se construye UNA vez (en el inicializador)
 # y se reutiliza para todos los órdenes que le toquen a ese proceso.
 _WK = {}
 
 
-def _wk_init(entorno, vehiculos, reservas_base, calidad, inicios, cola, contador):
+def _wk_init(entorno, vehiculos, reservas_base, calidad, inicios, cola, contador,
+             arribos, parar):
     """Inicializador de cada proceso: compila los núcleos (caché en disco), crea
-    su propio planificador y le asigna un identificador de núcleo correlativo."""
+    su propio planificador y le asigna un identificador de núcleo correlativo.
+    'arribos'/'parar' son el estado compartido de la parada por hornadas."""
     warmup()
     pl = Planificador(entorno)
     pl.configurar_calidad(calidad)
@@ -2842,7 +2892,8 @@ def _wk_init(entorno, vehiculos, reservas_base, calidad, inicios, cola, contador
         wid = contador.value
         contador.value += 1
     _WK.update(pl=pl, vehiculos=vehiculos, reservas=reservas_base,
-               inicios=inicios, cola=cola, wid=wid, ult=0.0)
+               inicios=inicios, cola=cola, wid=wid, ult=0.0,
+               arribos=arribos, parar=parar)
 
 
 def _wk_eval(args):
@@ -2852,9 +2903,16 @@ def _wk_eval(args):
     pl = _WK["pl"]
     cola = _WK["cola"]
     wid = _WK["wid"]
-    pl.max_exp = max_exp
+    parar = _WK["parar"]
+    if max_exp is not None:              # None → se respeta el tope de calidad
+        pl.max_exp = max_exp
 
     def tick(expand):
+        # Parada global: en cuanto otro proceso alcanza el 90 % de llegadas,
+        # abortamos la búsqueda en curso adelantando el deadline al pasado (el
+        # bucle A* lo comprueba cada 256 expansiones y devuelve al instante).
+        if parar is not None and parar.value:
+            pl.deadline = time.perf_counter() - 1.0
         ahora = time.perf_counter()
         if ahora - _WK["ult"] >= 0.08:          # limita el tráfico entre procesos
             _WK["ult"] = ahora
@@ -2870,7 +2928,8 @@ def _wk_eval(args):
         # los primeros vehículos agotaban el tiempo de los últimos.
         trays, motivos, coste = planificar_orden(
             pl, _WK["vehiculos"], orden, _WK["reservas"], inicios=_WK["inicios"],
-            deadline_dur=deadline_dur)
+            deadline_dur=deadline_dur,
+            arribos=_WK["arribos"], parar=parar)
     finally:
         pl.tick = None
     fallos = sum(1 for i in orden if trays[i] is None)
@@ -2879,6 +2938,98 @@ def _wk_eval(args):
     except Exception:
         pass
     return orden, fallos, coste, trays, motivos
+
+
+def evaluar_ordenes_hornadas(env, vehiculos, ordenes, reservas_base, inicios,
+                             calidad, max_exp=None, progreso=None,
+                             sigue_vivo=None):
+    """Evalúa los órdenes candidatos POR HORNADAS de tantos órdenes como núcleos
+    utilizables (una orden por núcleo, todas a la vez). Cada hornada se detiene en
+    cuanto el contador ACUMULADO de vehículos llegados alcanza FRAC_PARADA_GLOBAL ·
+    (vehículos vistos hasta esa hornada); los rezagados de la hornada en curso se
+    cortan (cuentan como fallo) y se pasa a la siguiente. La usan TANTO el
+    escritorio (tkinter) COMO el servidor web, cada uno con sus 'callbacks'.
+
+    'max_exp': tope de expansiones por vehículo (None → el del nivel de calidad).
+    'progreso(texto)': callback opcional de avance (barra de estado / web).
+    'sigue_vivo()': predicado opcional; si devuelve False se aborta y retorna None
+    (p. ej. ventana cerrada). Devuelve el mejor (fallos, coste, trays, motivos,
+    orden), o None."""
+    ctx = multiprocessing.get_context("spawn")
+    nucleos = nucleos_disponibles()
+    workers = max(1, min(len(ordenes), nucleos))
+    m = len(ordenes[0]) if ordenes else 0     # vehículos por orden (igual en todas)
+    cola = ctx.Queue()
+    contador = ctx.Value("i", 0)
+    # Estado compartido de la PARADA POR HORNADAS: 'arribos' cuenta —ACUMULADO
+    # entre hornadas— los vehículos llegados; el proceso principal lo compara
+    # con el umbral de la hornada y pone 'parar' a 1 para cortar los rezagados.
+    arribos = ctx.Value("i", 0)
+    parar = ctx.Value("i", 0)
+    nodos = {}                     # wid -> últimos nodos reportados
+    mejor = None
+    clave_mejor = None             # (fallos, coste, idx): desempata por índice
+    # Hornadas de 'workers' órdenes: dentro de cada una TODAS corren a la vez,
+    # así que el umbral acumulado siempre es alcanzable dentro de la hornada.
+    hornadas = [ordenes[i:i + workers]
+                for i in range(0, len(ordenes), workers)]
+    total_veh = len(ordenes) * m
+    ex = ProcessPoolExecutor(
+        max_workers=workers, mp_context=ctx, initializer=_wk_init,
+        initargs=(env, vehiculos, reservas_base, calidad,
+                  inicios, cola, contador, arribos, parar))
+    try:
+        oi_base = 0                # índice global del primer orden de la hornada
+        vistos = 0                 # órdenes despachados hasta ahora (acumulado)
+        for hj, hornada in enumerate(hornadas):
+            parar.value = 0                       # nueva hornada: sin corte aún
+            vistos += len(hornada)
+            # Umbral ACUMULADO: 95 % de todos los vehículos vistos hasta aquí.
+            umbral = max(1, math.ceil(FRAC_PARADA_GLOBAL * vistos * m))
+            # dur=None: no se corta cada vehículo por reloj (eso causaba fallos
+            # «por tiempo»); busca hasta su tope de nodos y es el umbral de
+            # llegadas quien acota el tiempo de la hornada.
+            fut_idx = {ex.submit(_wk_eval, (orden, max_exp, None)): oi_base + k
+                       for k, orden in enumerate(hornada)}
+            oi_base += len(hornada)
+            pendientes = set(fut_idx)
+            while pendientes:
+                if sigue_vivo is not None and not sigue_vivo():
+                    return None
+                while True:        # vaciar la cola de progreso
+                    try:
+                        wid, expand = cola.get_nowait()
+                    except queue.Empty:
+                        break
+                    nodos[wid] = expand
+                # Umbral acumulado alcanzado → cortar los rezagados de la hornada.
+                if not parar.value and arribos.value >= umbral:
+                    parar.value = 1
+                for f in [f for f in pendientes if f.done()]:
+                    pendientes.discard(f)
+                    try:
+                        orden, fallos, coste, trays, motivos = f.result()
+                    except Exception:
+                        continue
+                    clave = (fallos, coste, fut_idx[f])
+                    if clave_mejor is None or clave < clave_mejor:
+                        clave_mejor = clave
+                        mejor = (fallos, coste, trays, motivos, orden)
+                if progreso is not None:
+                    detalle = " ".join(f"N{w + 1}:{_nodos_corto(nodos.get(w, 0))}"
+                                       for w in range(workers))
+                    progreso(
+                        f"Hornada {hj + 1}/{len(hornadas)} · "
+                        f"{min(arribos.value, total_veh)}/{total_veh} llegadas "
+                        f"(corta en {umbral}) · {detalle}")
+                time.sleep(0.02)
+    finally:
+        try:
+            ex.shutdown(wait=False, cancel_futures=True)
+        except TypeError:          # cancel_futures: Python < 3.9
+            ex.shutdown(wait=False)
+        cola.close()
+    return mejor
 
 
 # --------------------------------------------------------------------------- #
@@ -3676,8 +3827,7 @@ class App:
             if explorar and nucleos_disponibles() >= 2 and n >= 3:
                 try:
                     mejor = self._evaluar_ordenes_paralelo(
-                        ordenes, reservas_base, inicios, cap_prev,
-                        PLAZO_VEH_CAND)
+                        ordenes, reservas_base, inicios, cap_prev)
                     hecho_paralelo = True
                     if mejor is None:            # ventana cerrada durante el cálculo
                         return {}, {}
@@ -3773,67 +3923,22 @@ class App:
             pl.max_exp = cap_prev
 
     def _evaluar_ordenes_paralelo(self, ordenes, reservas_base, inicios,
-                                  max_exp, dur):
-        """Evalúa los órdenes candidatos repartidos entre los núcleos disponibles
-        (un proceso por núcleo, hasta tantos como órdenes). Devuelve el mejor
-        (fallos, coste, trays, motivos, orden), o None si se cierra la ventana.
-
-        Mientras corre, muestra abajo cuántos núcleos están trabajando y los
-        nodos que explora cada uno en el vehículo que planifica en ese momento."""
-        ctx = multiprocessing.get_context("spawn")
-        nucleos = nucleos_disponibles()
-        workers = max(1, min(len(ordenes), nucleos))
-        cola = ctx.Queue()
-        contador = ctx.Value("i", 0)
+                                  max_exp):
+        """Envoltorio de la evaluación POR HORNADAS (evaluar_ordenes_hornadas)
+        con los 'callbacks' de la interfaz de escritorio: refresca la barra de
+        estado y aborta si se cierra la ventana. Devuelve el mejor (fallos,
+        coste, trays, motivos, orden) o None."""
         calidad = int(round(float(self.calidad.get())))
-        nodos = {}                     # wid -> últimos nodos reportados
-        mejor = None
-        ex = ProcessPoolExecutor(
-            max_workers=workers, mp_context=ctx, initializer=_wk_init,
-            initargs=(self.env, self.vehiculos, reservas_base, calidad,
-                      inicios, cola, contador))
-        try:
-            fut_idx = {ex.submit(_wk_eval, (orden, max_exp, dur)): oi
-                       for oi, orden in enumerate(ordenes)}
-            pendientes = set(fut_idx)
-            total = len(pendientes)
-            clave_mejor = None         # (fallos, coste, idx): desempata por índice
-            while pendientes:
-                if not self.root.winfo_exists():
-                    return None
-                while True:            # vaciar la cola de progreso
-                    try:
-                        wid, expand = cola.get_nowait()
-                    except queue.Empty:
-                        break
-                    nodos[wid] = expand
-                for f in [f for f in pendientes if f.done()]:
-                    pendientes.discard(f)
-                    try:
-                        orden, fallos, coste, trays, motivos = f.result()
-                    except Exception:
-                        continue
-                    clave = (fallos, coste, fut_idx[f])
-                    if clave_mejor is None or clave < clave_mejor:
-                        clave_mejor = clave
-                        mejor = (fallos, coste, trays, motivos, orden)
-                activos = min(workers, len(pendientes))
-                detalle = "   ".join(f"núcleo {w + 1}: {nodos.get(w, 0):,}"
-                                     for w in range(workers))
-                self._plan_msg = (
-                    f"Explorando {total} órdenes en paralelo · "
-                    f"{activos}/{nucleos} núcleos activos "
-                    f"({total - len(pendientes)}/{total} listos)")
-                self.estado.set(f"{self._plan_msg}   ⟶   {detalle}")
-                self.root.update()
-                time.sleep(0.02)
-        finally:
-            try:
-                ex.shutdown(wait=False, cancel_futures=True)
-            except TypeError:          # cancel_futures: Python < 3.9
-                ex.shutdown(wait=False)
-            cola.close()
-        return mejor
+
+        def progreso(texto):
+            self._plan_msg = texto
+            self.estado.set(texto)
+            self.root.update()
+
+        return evaluar_ordenes_hornadas(
+            self.env, self.vehiculos, ordenes, reservas_base, inicios,
+            calidad, max_exp=max_exp, progreso=progreso,
+            sigue_vivo=self.root.winfo_exists)
 
     def _aplicar_resultado(self, indices, trays, motivos, k_inicio):
         """Vuelca las trayectorias en los vehículos (desplazadas k_inicio pasos si
