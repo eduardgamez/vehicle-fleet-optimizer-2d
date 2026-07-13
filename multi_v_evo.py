@@ -39,11 +39,6 @@ Capacidades:
     conector analítico persigue una "zanahoria" situada sobre el eje de llegada,
     de modo que el coche se alinea con dicho eje antes de rematar.
 
-  · REUTILIZACIÓN — un vehículo que ya llegó a su destino puede recibir una
-    misión nueva escribiendo en la entrada de texto una lista de diccionarios
-    con su identificador; solo los vehículos mencionados reciben ruta nueva y
-    el resto permanece aparcado (y es respetado como obstáculo).
-
   · MAPAS DESDE IMAGEN — una imagen puede convertirse en mapa: los píxeles
     cercanos al negro se vuelven obstáculo y los cercanos al blanco, espacio
     libre. El mapa resultante puede GUARDARSE en la carpeta `mapas/` y volver a
@@ -117,11 +112,11 @@ STEER_SPEED_C = 0.5
 V_MAN_FRAC = 0.45
 
 
-# Tope de la RELAJACIÓN del ángulo de llegada. El ángulo puede relajarse para
-# ayudar a llegar, pero NUNCA hasta invertir el SENTIDO: se limita a <90° para
-# que el coche jamás se pare mirando al revés (p. ej. 180°). Respeta el sentido,
-# no solo el eje de la orientación.
-ANG_MAX_SENTIDO = math.radians(80)
+# Tope FINAL de la RELAJACIÓN del ángulo de llegada (etapa 2). La etapa 2 abre el
+# ángulo hasta LIBRE (±180°, sentido incluido) como máxima red de seguridad para
+# llegar. La calidad 5 se detiene en ±90° (en la máxima calidad no interesa
+# aparcar mirando al revés). El tope se fija por nivel en self.ang_tol_final,
+# dentro de configurar_calidad.
 
 
 # NOTA: se eliminó el límite de velocidad por aceleración lateral (un tope de
@@ -1699,7 +1694,7 @@ class Vehiculo:
 
     def __init__(self, idx, inicio, meta, length=VEH_LEN, width=VEH_WID,
                  v_max=VEH_VMAX, a_max=VEH_AMAX, giro_max=None,
-                 meta_th=None, grupo=1, prioridad=1, vid=None):
+                 meta_th=None, grupo=1, prioridad=1, vid=None, v_inicial=0.0):
         self.idx = idx                # índice interno (color, dibujo)
         self.vid = vid if vid is not None else idx + 1   # identificador de usuario
         self.inicio = inicio          # (x, y, theta)
@@ -1712,6 +1707,7 @@ class Vehiculo:
         self.wheelbase = 0.55 * length
         self.delta_max = giro_max if giro_max is not None else math.radians(VEH_GIRO)
         self.v_max = v_max
+        self.v_inicial = v_inicial    # velocidad de arranque (m/s)
         self.a_max = a_max            # aceleración/frenado máximos (m/s²)
         self.traj = []                # [(x, y, theta), ...]
         self.dt_plan = DT
@@ -1724,11 +1720,6 @@ class Vehiculo:
     @property
     def diag(self):
         return math.hypot(self.length, self.width)
-
-    @property
-    def pose_final(self):
-        """Pose en la que queda aparcado al terminar (o el inicio si no hay ruta)."""
-        return self.traj[-1] if self.traj else self.inicio
 
     def pose_en_tiempo(self, t):
         """Pose en el instante t (s). Tras el final se queda aparcado en la meta."""
@@ -1781,7 +1772,7 @@ class Planificador:
         self.goal_tol_fin = 0.20      # tolerancia FINA: el piloto conduce hasta aquí
         #                              (para no quedarse parado a un paso de la meta)
         self.v_tol = 0.45
-        self.ang_tol_meta = math.radians(5)    # tolerancia del ÁNGULO DE LLEGADA
+        self.ang_tol_meta = math.radians(3)    # tolerancia del ÁNGULO DE LLEGADA
         self.k_max = 1600
         self.dist_tiro = 10.0         # por defecto; se ajusta en planificar al lado mayor del vehículo
         self.ang_tiro = math.radians(30)
@@ -1851,22 +1842,22 @@ class Planificador:
         # no empeora los giros; solo hace las rutas algo menos óptimas (un poco
         # más largas), cosa asumible.
         tabla = {
-            # nivel: (n_dir, ang_res, peso_h, max_nodos, rel_ini, rel_span,
-            #         ang_tol_max, rel_ini_g, rel_span1_g, rel_span2_g,
-            #         plazo_mejora_g)
-            # rel_span1_g: expansiones-en-meta para pasar de ang_tol a
-            # ang_tol_max (etapa 1, "casi bien encarada"). rel_span2_g: las
-            # que hacen falta ADEMÁS para llegar de ahí a ángulo LIBRE (etapa
-            # 2). En calidad 5, rel_span2_g es enorme a propósito: la etapa 1
-            # sigue siendo el techo práctico y la 2 solo se alcanza en un caso
-            # verdaderamente patológico (no imposible, pero rarísimo).
-            1: (17, 12, 1.70, 1200000,  8000,  40000, 0.56, 120_000, 189_000,    189_000,  30_000),
-            2: (23, 11, 1.50, 1650000, 12000,  80000, 0.46, 140_000, 220_500,    220_500,  35_000),
-            3: (31, 10, 1.35, 2400000, 15000, 120000, 0.36, 160_000, 252_000,    252_000,  40_000),
-            4: (41,  8, 1.20, 3600000, 25000, 200000, 0.28, 200_000, 315_000,    315_000,  50_000),
-            5: (55,  6, 1.08, 5400000, 40000, 350000, 0.12, 500_000, 500_000,  2_500_000, 120_000),
+            # nivel: (n_dir, ang_res, peso_h, max_nodos, ang_tol_max,
+            #         rel_ini_g, rel_span1_g, rel_span2_g, plazo_mejora_g)
+            # peso_h: peso del heurístico (fijo por nivel). ang_tol_max: tope del
+            # ángulo de la etapa 1 (rad ≈ 26°,21°,17°,13°,7°). rel_span1_g:
+            # expansiones-en-meta para pasar de ang_tol a ang_tol_max (etapa 1,
+            # "casi bien encarada"). rel_span2_g: las que abarca la etapa 2,
+            # ajustadas para que el ángulo crezca al DOBLE de ritmo que en la
+            # etapa 1 hasta el ángulo libre (±180°). En calidad 5 el ritmo es el
+            # mismo (como si fuera a ±180°) pero el ángulo se corta en ±90°.
+            1: (17, 12, 1.9, 1200000, 0.4538,  84_000, 132_000,    442_000,  30_000),
+            2: (23, 11, 1.6, 1650000, 0.3665,  98_000, 154_000,    680_000,  35_000),
+            3: (31, 10, 1.3, 2400000, 0.2967, 112_000, 176_000,  1_025_000,  40_000),
+            4: (41,  8, 1.1, 3600000, 0.2269, 140_000, 221_000,  1_845_000,  50_000),
+            5: (55,  6, 1.0, 5400000, 0.12,   350_000, 350_000,  7_818_000, 120_000),
         }
-        (n_dir, ang, peso, mx, r_ini, r_span, a_max, r_ini_g, r_span1_g,
+        (n_dir, ang, peso, mx, a_max, r_ini_g, r_span1_g,
          r_span2_g, plazo_mejora_g) = tabla.get(int(nivel), tabla[3])
         half = n_dir // 2
         fracs = [0.0]
@@ -1879,8 +1870,6 @@ class Planificador:
         self.max_exp = mx
         if mx * 2 > self.max_nodos:
             self.max_nodos = mx * 2
-        self.rel_ini = r_ini
-        self.rel_span = r_span
         self.ang_tol_max = a_max
         # Relajación del ángulo por esfuerzo EN ZONA DE META (expansiones con
         # d_goal ≤ dist_tiro, NADA de tiempo): sin relajar hasta rel_ini_g;
@@ -1889,6 +1878,9 @@ class Planificador:
         self.rel_ini_g = r_ini_g
         self.rel_span1_g = r_span1_g
         self.rel_span2_g = r_span2_g
+        # Tope final del ángulo tras la etapa 2: libre (±180°), salvo calidad 5,
+        # que se corta en ±90°.
+        self.ang_tol_final = math.radians(90) if int(nivel) == 5 else math.pi
         # Presupuesto de MEJORA del ángulo (búsqueda anytime), en EXPANSIONES
         # sin mejorar (no segundos): tras hallar una llegada solo válida por
         # relajación, cuántos nodos más se exploran buscando una mejor
@@ -2057,15 +2049,12 @@ class Planificador:
         return math.hypot(x - self._h_gx, y - self._h_gy) / self.v_max_c
 
     # ----------------------------- búsqueda ------------------------------ #
-    def planificar(self, veh, reservas, inicio=None):
+    def planificar(self, veh, reservas):
         """Devuelve la trayectoria [(x,y,th), ...] (una pose por paso fino de DT,
         con la velocidad ya incorporada) o None si no halla solución. El estado
         incluye la velocidad (x,y,θ,v,k) y las acciones eligen la aceleración
         (acotada) y la dirección, de modo que el planificador puede acelerar o
         frenar en cualquier momento si eso da una ruta mejor.
-
-        'inicio' permite planificar desde una pose distinta de veh.inicio (p. ej.
-        una misión nueva desde la plaza donde el vehículo quedó aparcado).
 
         Si veh.meta_th no es None, la llegada solo se acepta con la orientación
         final dentro de ang_tol_meta alrededor de ese ángulo."""
@@ -2076,8 +2065,10 @@ class Planificador:
         L = veh.wheelbase
         dmax = veh.delta_max
         r_min = L / max(1e-3, math.tan(dmax))   # radio de giro mínimo (para el heurístico)
-        sx, sy, sth = inicio if inicio is not None else veh.inicio
+        sx, sy, sth = veh.inicio
         gx, gy = veh.meta
+        # Velocidad de arranque elegida por el usuario (0 en modo aleatorio).
+        v_ini = veh.v_inicial
         con_ang = 0 if veh.meta_th is None else 1
         gth = veh.meta_th if con_ang else 0.0
         ang_tol = self.ang_tol_meta
@@ -2117,14 +2108,17 @@ class Planificador:
         # El grafo de reconstrucción se indexa por ID único de nodo (no por la
         # clave discretizada), de modo que cada tramo arranca donde acaba el de su
         # padre → trayectoria continua. La clave solo poda estados dominados.
-        clave0 = self._clave(sx, sy, sth, 0.0, 0)
+        # Acota la velocidad de arranque al rango físico del vehículo (por si un
+        # Vehiculo se creó a mano fuera del validador de especificaciones).
+        v_ini = min(self.v_max_c, max(-self.v_rev, v_ini))
+        clave0 = self._clave(sx, sy, sth, v_ini, 0)
         nid = 0
         padre_id = {}
         arista_id = {}
         delta_prev = {0: 0.0}
         acc_prev = {0: 0.0}
         h0 = self._h_time(sx, sy)
-        abierto = [(self.peso_h * h0, 0, sx, sy, sth, 0.0, 0, 0.0)]
+        abierto = [(self.peso_h * h0, 0, sx, sy, sth, v_ini, 0, 0.0)]
         mejor_g = {clave0: 0.0}
         expand = 0
         self._exp_ult_maniobra = 0
@@ -2226,8 +2220,10 @@ class Planificador:
             # por el viaje, y el resultado no depende de la velocidad de la
             # máquina.
             if con_ang:
-                # Etapa 1 (hasta ang_tol_max) y etapa 2 (hasta ángulo libre),
-                # cada una con su propio presupuesto de expansiones-en-meta.
+                # Etapa 1 (hasta ang_tol_max) y etapa 2 (al DOBLE de ritmo hasta
+                # el ángulo libre), cada una con su presupuesto de expansiones-en-
+                # meta. El presupuesto de la etapa 2 (rel_span2_g) ya está fijado
+                # para que su pendiente sea el doble que la de la etapa 1.
                 fr1 = (exp_goal - self.rel_ini_g) / self.rel_span1_g
                 if fr1 < 0.0:
                     fr1 = 0.0
@@ -2242,11 +2238,10 @@ class Planificador:
                 max_tol = max(ang_tol, self.ang_tol_max)
                 ang_tol_din = (ang_tol + (max_tol - ang_tol) * fr1
                                + (math.pi - max_tol) * fr2)
-                # Nunca se relaja hasta invertir el sentido: el coche no debe
-                # pararse mirando al revés (respeta sentido, no solo eje).
-                if ang_tol_din > ANG_MAX_SENTIDO:
-                    ang_tol_din = ANG_MAX_SENTIDO
-                fr = 0.6 * fr1 + 0.4 * fr2   # progreso combinado (para el peso)
+                # Tope final del nivel: libre (±180°) en calidades 1-4, ±90° en
+                # calidad 5.
+                if ang_tol_din > self.ang_tol_final:
+                    ang_tol_din = self.ang_tol_final
                 if mejor_traj is not None:
                     # Ya hay llegada candidata: solo interesan llegadas
                     # CLARAMENTE mejores (85% de su error, sin bajar de la
@@ -2257,19 +2252,7 @@ class Planificador:
                     if ang_tol_din > tol_mejora:
                         ang_tol_din = tol_mejora
                 con_ang_din = 1
-                # PESO del heurístico: se sube con el avance en NODOS (nid vs
-                # rel_ini/rel_span) para que los tránsitos difíciles por calles
-                # estrechas carguen hacia la meta en vez de barrer en anchura.
-                # En fase de relajación la optimalidad ya está sacrificada;
-                # esto solo acorta la espera.
-                fr_p = (nid - self.rel_ini) / self.rel_span
-                if fr_p < 0.0:
-                    fr_p = 0.0
-                elif fr_p > 1.0:
-                    fr_p = 1.0
-                if fr > fr_p:
-                    fr_p = fr
-                peso_din = self.peso_h * (1.0 + 0.35 * fr_p)
+                peso_din = self.peso_h
             else:
                 ang_tol_din = ang_tol
                 con_ang_din = 0
@@ -2366,8 +2349,8 @@ class Planificador:
                 ang_ok = True
                 if con_ang_din:
                     tol_resp = 1.5 * ang_tol_din
-                    if tol_resp > ANG_MAX_SENTIDO:
-                        tol_resp = ANG_MAX_SENTIDO      # nunca aceptar sentido invertido
+                    if tol_resp > self.ang_tol_final:
+                        tol_resp = self.ang_tol_final   # tope final del nivel
                     ang_ok = abs(ang_norm(th - gth)) <= tol_resp
                 if ang_ok:
                     Ld = self._len + 2.0 * self.margen_din
@@ -2781,13 +2764,10 @@ def _cuenta_arribo(arribos):
 
 
 def planificar_orden(planificador, vehiculos, orden, reservas_base,
-                     inicios=None, tick_veh=None, deadline_dur=None,
+                     tick_veh=None, deadline_dur=None,
                      arribos=None, parar=None):
     """Planifica cooperativamente los vehículos de 'orden' (índices) sobre las
-    reservas base (p. ej. vehículos aparcados de misiones anteriores).
-
-    'inicios' (dict idx → pose) permite arrancar cada vehículo desde una pose
-    distinta de su inicio nominal (misiones nuevas desde la plaza actual).
+    reservas base.
 
     'deadline_dur', si se indica, es el presupuesto de tiempo (segundos) POR
     VEHÍCULO: se renueva justo antes de planificar cada uno. Sin esto, un
@@ -2823,13 +2803,11 @@ def planificar_orden(planificador, vehiculos, orden, reservas_base,
             continue
         if tick_veh is not None:
             tick_veh(pos, idx)
-        ini = inicios.get(idx) if inicios else None
         planificador.bloqueos = bloqueos_metas(
-            vehiculos, orden, excepto=idx,
-            pose0=(ini if ini is not None else veh.inicio))
+            vehiculos, orden, excepto=idx, pose0=veh.inicio)
         if deadline_dur is not None:
             planificador.deadline = time.perf_counter() + deadline_dur
-        traj = planificador.planificar(veh, reservas, inicio=ini)
+        traj = planificador.planificar(veh, reservas)
         motivos[idx] = planificador.motivo
         if traj is not None and len(traj) >= 2:
             trays[idx] = traj
@@ -2880,7 +2858,7 @@ def _nodos_corto(n):
 _WK = {}
 
 
-def _wk_init(entorno, vehiculos, reservas_base, calidad, inicios, cola, contador,
+def _wk_init(entorno, vehiculos, reservas_base, calidad, cola, contador,
              arribos, parar):
     """Inicializador de cada proceso: compila los núcleos (caché en disco), crea
     su propio planificador y le asigna un identificador de núcleo correlativo.
@@ -2892,7 +2870,7 @@ def _wk_init(entorno, vehiculos, reservas_base, calidad, inicios, cola, contador
         wid = contador.value
         contador.value += 1
     _WK.update(pl=pl, vehiculos=vehiculos, reservas=reservas_base,
-               inicios=inicios, cola=cola, wid=wid, ult=0.0,
+               cola=cola, wid=wid, ult=0.0,
                arribos=arribos, parar=parar)
 
 
@@ -2927,7 +2905,7 @@ def _wk_eval(args):
         # cada uno): antes se fijaba aquí un único plazo para el orden entero y
         # los primeros vehículos agotaban el tiempo de los últimos.
         trays, motivos, coste = planificar_orden(
-            pl, _WK["vehiculos"], orden, _WK["reservas"], inicios=_WK["inicios"],
+            pl, _WK["vehiculos"], orden, _WK["reservas"],
             deadline_dur=deadline_dur,
             arribos=_WK["arribos"], parar=parar)
     finally:
@@ -2940,7 +2918,7 @@ def _wk_eval(args):
     return orden, fallos, coste, trays, motivos
 
 
-def evaluar_ordenes_hornadas(env, vehiculos, ordenes, reservas_base, inicios,
+def evaluar_ordenes_hornadas(env, vehiculos, ordenes, reservas_base,
                              calidad, max_exp=None, progreso=None,
                              sigue_vivo=None):
     """Evalúa los órdenes candidatos POR HORNADAS de tantos órdenes como núcleos
@@ -2977,7 +2955,7 @@ def evaluar_ordenes_hornadas(env, vehiculos, ordenes, reservas_base, inicios,
     ex = ProcessPoolExecutor(
         max_workers=workers, mp_context=ctx, initializer=_wk_init,
         initargs=(env, vehiculos, reservas_base, calidad,
-                  inicios, cola, contador, arribos, parar))
+                  cola, contador, arribos, parar))
     try:
         oi_base = 0                # índice global del primer orden de la hornada
         vistos = 0                 # órdenes despachados hasta ahora (acumulado)
@@ -3037,7 +3015,7 @@ def evaluar_ordenes_hornadas(env, vehiculos, ordenes, reservas_base, inicios,
 # --------------------------------------------------------------------------- #
 # Claves admitidas por vehículo (los ángulos SIEMPRE en grados en el texto):
 #
-#   id              identificador (entero o texto). Obligatorio para reutilizar.
+#   id              identificador del vehículo (entero o texto; si falta: su nº).
 #   inicio          (x, y) punto inicial en metros
 #   giro_inicial    orientación inicial en grados (si falta: mirando a la meta)
 #   meta            (x, y) punto destino en metros
@@ -3045,6 +3023,9 @@ def evaluar_ordenes_hornadas(env, vehiculos, ordenes, reservas_base, inicios,
 #                   exigencia (si falta: la dirección inicio→meta)
 #   largo, ancho    dimensiones del vehículo en metros
 #   v_max           velocidad máxima (m/s)
+#   v_inicial       velocidad de arranque (m/s; si falta: 0). Positiva = avanzando,
+#                   negativa = marcha atrás. Acotada a |v_inicial| ≤ v_max (atrás,
+#                   a −0.5·v_max). En modo aleatorio siempre arranca de 0.
 #   a_max           aceleración/frenado máximos (m/s²)
 #   giro_max        ángulo máximo de dirección en grados (capacidad de giro)
 #   grupo           grupo de prioridad (entero); menor → se planifica antes. Un
@@ -3056,10 +3037,11 @@ def evaluar_ordenes_hornadas(env, vehiculos, ordenes, reservas_base, inicios,
 # Ejemplo:
 #   [{"id": 1, "inicio": (3, 3), "giro_inicial": 0, "meta": (36, 20),
 #     "angulo_llegada": 90, "largo": 1.6, "ancho": 0.8, "v_max": 3.0,
-#     "a_max": 1.2, "giro_max": 33, "grupo": 1, "prioridad": 1},
+#     "v_inicial": 1.5, "a_max": 1.2, "giro_max": 33, "grupo": 1, "prioridad": 1},
 #    {"id": 2, "inicio": (36, 3), "meta": (4, 20), "grupo": 2, "prioridad": 1}]
 CLAVES_VEH = {"id", "inicio", "giro_inicial", "meta", "angulo_llegada",
-              "largo", "ancho", "v_max", "a_max", "giro_max", "grupo", "prioridad"}
+              "largo", "ancho", "v_max", "v_inicial", "a_max", "giro_max",
+              "grupo", "prioridad"}
 
 
 def _como_punto(valor, clave):
@@ -3136,6 +3118,19 @@ def parsear_especificaciones(texto):
                              f"puede superar al largo ({e['largo']:g}).")
         if "v_max" in d:
             e["v_max"] = _como_num(d["v_max"], "v_max", 0.2, 12.0)
+        if "v_inicial" in d:
+            e["v_inicial"] = _como_num(d["v_inicial"], "v_inicial", -12.0, 12.0)
+            # La velocidad inicial no puede superar (en magnitud) la v_max del
+            # vehículo; hacia atrás se limita a la marcha atrás máxima (0.5·v_max).
+            vmx = e.get("v_max", VEH_VMAX)
+            if e["v_inicial"] > vmx:
+                raise ValueError(f"Vehículo {e['id']!r}: la v_inicial "
+                                 f"({e['v_inicial']:g}) no puede superar la v_max "
+                                 f"({vmx:g}).")
+            if e["v_inicial"] < -0.5 * vmx:
+                raise ValueError(f"Vehículo {e['id']!r}: la v_inicial marcha atrás "
+                                 f"({e['v_inicial']:g}) no puede superar la marcha "
+                                 f"atrás máxima (−0.5·v_max = {-0.5 * vmx:g}).")
         if "a_max" in d:
             e["a_max"] = _como_num(d["a_max"], "a_max", 0.1, 8.0)
         if "giro_max" in d:
@@ -3181,7 +3176,8 @@ def espec_a_vehiculo(e, idx, entorno):
                     meta_th=thm,
                     grupo=e.get("grupo", 1),
                     prioridad=e.get("prioridad", 1),
-                    vid=e["id"])
+                    vid=e["id"],
+                    v_inicial=e.get("v_inicial", 0.0))
 
 
 def especs_a_texto(especs):
@@ -3194,7 +3190,7 @@ TEXTO_EJEMPLO = (
     "[\n"
     ' {"id": 1, "inicio": (3, 3),  "giro_inicial": 0,  "meta": (36, 20),\n'
     '  "angulo_llegada": 90, "largo": 1.6, "ancho": 0.8, "v_max": 3.0,\n'
-    '  "a_max": 1.2, "giro_max": 33, "grupo": 1, "prioridad": 1},\n'
+    '  "v_inicial": 1.5, "a_max": 1.2, "giro_max": 33, "grupo": 1, "prioridad": 1},\n'
     ' {"id": 2, "inicio": (36, 3), "meta": (4, 20), "grupo": 1, "prioridad": 1},\n'
     ' {"id": 3, "inicio": (20, 2), "meta": (20, 21), "angulo_llegada": "libre",\n'
     '  "grupo": 2, "prioridad": 1},\n'
@@ -3374,8 +3370,7 @@ class App:
                    command=self._seguro(self.calcular_y_simular)).grid(
             row=fila[0], column=0, columnspan=2, sticky="ew", pady=1)
         fila[0] += 1
-        for txt, cmd in (("⟳  Nuevas rutas para ids del texto", self.aplicar_nuevas_rutas),
-                         ("↺  Reproducir de nuevo", self.reproducir),
+        for txt, cmd in (("↺  Reproducir de nuevo", self.reproducir),
                          ("⏸  Pausar / reanudar", self.pausar),
                          ("⟲  Reiniciar", self.reiniciar)):
             ttk.Button(panel, text=txt, command=self._seguro(cmd)).grid(
@@ -3409,7 +3404,7 @@ class App:
 
         caja = ttk.Frame(cont)
         caja.grid(row=1, column=1, sticky="nsew", pady=(6, 0))
-        ttk.Label(caja, text="Vehículos manuales / nuevas rutas "
+        ttk.Label(caja, text="Vehículos manuales "
                              "(lista de diccionarios; ángulos en grados):").grid(
             row=0, column=0, sticky="w")
         self.texto = tk.Text(caja, height=8, width=int(W * SCALE / 8),
@@ -3787,9 +3782,9 @@ class App:
             indices = list(range(len(self.vehiculos)))
             base = Reservas()
             trays, motivos = self._planificar_flota(
-                indices, base, inicios=None,
+                indices, base,
                 reubicable=(self.modo.get() == "aleatorio"))
-            self._aplicar_resultado(indices, trays, motivos, k_inicio=0)
+            self._aplicar_resultado(indices, trays, motivos)
         finally:
             self._ocupado = False
 
@@ -3804,7 +3799,7 @@ class App:
         self.estado.set(f"{self._plan_msg}  ({expand:,} nodos explorados)")
         self.root.update()
 
-    def _planificar_flota(self, indices, reservas_base, inicios, reubicable):
+    def _planificar_flota(self, indices, reservas_base, reubicable):
         """Optimiza la flota: genera los órdenes candidatos según el modo elegido,
         evalúa cada uno con planificación cooperativa completa y se queda con el
         mejor (menos fallos; a igualdad, menor tiempo total). Los vehículos que
@@ -3827,7 +3822,7 @@ class App:
             if explorar and nucleos_disponibles() >= 2 and n >= 3:
                 try:
                     mejor = self._evaluar_ordenes_paralelo(
-                        ordenes, reservas_base, inicios, cap_prev)
+                        ordenes, reservas_base, cap_prev)
                     hecho_paralelo = True
                     if mejor is None:            # ventana cerrada durante el cálculo
                         return {}, {}
@@ -3865,8 +3860,7 @@ class App:
                         dur_veh = None
                     trays, motivos, coste = planificar_orden(
                         pl, self.vehiculos, orden, reservas_base,
-                        inicios=inicios, tick_veh=tick_veh,
-                        deadline_dur=dur_veh)
+                        tick_veh=tick_veh, deadline_dur=dur_veh)
                     fallos = sum(1 for i in orden if trays[i] is None)
                     if mejor is None or (fallos, coste) < (mejor[0], mejor[1]):
                         mejor = (fallos, coste, trays, motivos, orden)
@@ -3891,16 +3885,14 @@ class App:
                                       "(búsqueda exhaustiva)")
                     self.estado.set(self._plan_msg + "…")
                     self.root.update()
-                    ini = inicios.get(i) if inicios else None
                     pl.bloqueos = bloqueos_metas(
-                        self.vehiculos, orden, excepto=i,
-                        pose0=(ini if ini is not None else veh.inicio))
+                        self.vehiculos, orden, excepto=i, pose0=veh.inicio)
                     pl.deadline = None            # solo nodos
-                    traj = pl.planificar(veh, reservas, inicio=ini)
+                    traj = pl.planificar(veh, reservas)
                     motivos[i] = pl.motivo
                     intentos = 0
                     while (pl.motivo == "sin_ruta" and reubicable
-                           and inicios is None and intentos < 12):
+                           and intentos < 12):
                         if not self._reubicar(veh):
                             break
                         pl.bloqueos = bloqueos_metas(self.vehiculos, orden,
@@ -3922,8 +3914,7 @@ class App:
             pl.deadline = None
             pl.max_exp = cap_prev
 
-    def _evaluar_ordenes_paralelo(self, ordenes, reservas_base, inicios,
-                                  max_exp):
+    def _evaluar_ordenes_paralelo(self, ordenes, reservas_base, max_exp):
         """Envoltorio de la evaluación POR HORNADAS (evaluar_ordenes_hornadas)
         con los 'callbacks' de la interfaz de escritorio: refresca la barra de
         estado y aborta si se cierra la ventana. Devuelve el mejor (fallos,
@@ -3936,13 +3927,13 @@ class App:
             self.root.update()
 
         return evaluar_ordenes_hornadas(
-            self.env, self.vehiculos, ordenes, reservas_base, inicios,
+            self.env, self.vehiculos, ordenes, reservas_base,
             calidad, max_exp=max_exp, progreso=progreso,
             sigue_vivo=self.root.winfo_exists)
 
-    def _aplicar_resultado(self, indices, trays, motivos, k_inicio):
-        """Vuelca las trayectorias en los vehículos (desplazadas k_inicio pasos si
-        son misiones nuevas), reconstruye los fotogramas e informa del resultado."""
+    def _aplicar_resultado(self, indices, trays, motivos):
+        """Vuelca las trayectorias en los vehículos, reconstruye los fotogramas e
+        informa del resultado."""
         from tkinter import messagebox
         if not self.root.winfo_exists():
             return
@@ -3952,8 +3943,7 @@ class App:
             traj = trays.get(i)
             if traj is None:
                 veh.mision_ok = False
-                if k_inicio == 0:
-                    veh.traj = []
+                veh.traj = []
                 if motivos.get(i) == "sin_ruta":
                     sin_ruta += 1
                 else:
@@ -3961,13 +3951,7 @@ class App:
                 continue
             veh.mision_ok = True
             ok += 1
-            if k_inicio == 0:
-                veh.traj = traj
-            else:
-                base = veh.traj if veh.traj else [veh.inicio]
-                ultima = base[-1]
-                relleno = [ultima] * max(0, k_inicio - len(base))
-                veh.traj = base + relleno + traj[1:]
+            veh.traj = traj
             veh.dt_plan = DT
 
         self._dibujar_estatico()
@@ -3998,100 +3982,9 @@ class App:
         self.estado.set(f"{ok} rutas sin colisiones · tiempo total de flota "
                         f"{total:.1f} s ({len(self.frames)} fotogramas).{aviso}  "
                         "Reproduciendo…")
-        self.frame = max(0, min(k_inicio, len(self.frames) - 1))
+        self.frame = 0
         self.reproduciendo = True
         self._anim()
-
-    # ------------------- reutilización: nuevas rutas ---------------------- #
-    def aplicar_nuevas_rutas(self):
-        """Relee la entrada de texto como NUEVAS MISIONES: solo los vehículos cuyo
-        'id' aparezca en la lista reciben ruta nueva, arrancando desde la plaza
-        donde quedaron aparcados; el resto permanece quieto y es respetado como
-        obstáculo. Las nuevas misiones comienzan cuando toda la flota ha terminado
-        el movimiento anterior."""
-        from tkinter import messagebox
-        if not self.vehiculos or not self.frames:
-            messagebox.showinfo("Nada que reasignar",
-                                "Primero calcula y simula unas rutas; después "
-                                "escribe las misiones nuevas en el texto.")
-            return
-        try:
-            especs = parsear_especificaciones(self.texto.get("1.0", "end"))
-        except ValueError as e:
-            messagebox.showerror("Entrada de texto no válida", str(e))
-            return
-
-        por_id = {v.vid: v for v in self.vehiculos}
-        lote = []
-        try:
-            for e in especs:
-                if e["id"] not in por_id:
-                    raise ValueError(f"No existe ningún vehículo con id {e['id']!r}. "
-                                     f"Ids disponibles: {sorted(por_id)}")
-                if "inicio" in e or "giro_inicial" in e:
-                    raise ValueError(f"Vehículo {e['id']!r}: en una misión nueva no "
-                                     "se cambia 'inicio'/'giro_inicial' (arranca "
-                                     "desde donde quedó aparcado).")
-                if "largo" in e or "ancho" in e:
-                    raise ValueError(f"Vehículo {e['id']!r}: el tamaño del vehículo "
-                                     "no cambia en una misión nueva.")
-                if "meta" not in e:
-                    raise ValueError(f"Vehículo {e['id']!r}: la misión nueva "
-                                     "necesita 'meta'.")
-                veh = por_id[e["id"]]
-                mx, my = e["meta"]
-                px, py, pth = veh.pose_final
-                if "angulo_llegada" in e:
-                    thm = e["angulo_llegada"]
-                else:
-                    thm = math.atan2(my - py, mx - px)
-                th_plaza = thm if thm is not None else 0.0
-                if not self.env.libre(mx, my, th_plaza, veh.length, veh.width,
-                                      margen=0.15):
-                    raise ValueError(f"Vehículo {e['id']!r}: la plaza nueva "
-                                     f"({mx:g}, {my:g}) no cabe.")
-                lote.append((veh, e, thm))
-        except ValueError as e:
-            messagebox.showerror("Misiones nuevas no válidas", str(e))
-            return
-
-        self._detener()
-        # Las misiones nuevas comienzan cuando todo lo anterior ha acabado: a
-        # partir de ahí, los no mencionados son obstáculos ESTÁTICOS aparcados.
-        k_inicio = max(len(v.traj) if v.traj else 1 for v in self.vehiculos)
-        ids_lote = {veh.vid for veh, _, _ in lote}
-        base = Reservas()
-        for v in self.vehiculos:
-            if v.vid not in ids_lote:
-                base.add([v.pose_final], v.length, v.width)
-
-        indices = []
-        inicios = {}
-        for veh, e, thm in lote:
-            veh.meta = tuple(e["meta"])
-            veh.meta_th = thm
-            if "grupo" in e:
-                veh.grupo = e["grupo"]
-            if "prioridad" in e:
-                veh.prioridad = e["prioridad"]
-            if "v_max" in e:
-                veh.v_max = e["v_max"]
-            if "a_max" in e:
-                veh.a_max = e["a_max"]
-            if "giro_max" in e:
-                veh.delta_max = e["giro_max"]
-            indices.append(veh.idx)
-            inicios[veh.idx] = veh.pose_final
-
-        self._ocupado = True
-        try:
-            self._warm()
-            trays, motivos = self._planificar_flota(indices, base,
-                                                    inicios=inicios,
-                                                    reubicable=False)
-            self._aplicar_resultado(indices, trays, motivos, k_inicio=k_inicio)
-        finally:
-            self._ocupado = False
 
     # ----------------------------- reproducción --------------------------- #
     def reproducir(self):
@@ -4114,8 +4007,7 @@ class App:
             self._dibujar_frame()
             if self.frame >= len(self.frames) - 1:
                 self.reproduciendo = False
-                self.estado.set("Reproducción finalizada. Puedes escribir misiones "
-                                "nuevas en el texto y pulsar «Nuevas rutas».")
+                self.estado.set("Reproducción finalizada.")
                 return
             self.frame += 1
             self.anim_id = self.root.after(40, self._anim)

@@ -36,7 +36,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const btnInsertar = document.getElementById('btn-insertar');
   const btnSimular = document.getElementById('btn-simular');
-  const btnNuevasRutas = document.getElementById('btn-nuevas-rutas');
 
   const btnMapaAleatorio = document.getElementById('btn-mapa-aleatorio');
   const btnMapaImportar = document.getElementById('btn-mapa-importar');
@@ -638,34 +637,6 @@ document.addEventListener('DOMContentLoaded', () => {
   };
 
   btnSimular?.addEventListener('click', simularFlota);
-
-  // --- Nuevas Rutas ---
-  btnNuevasRutas?.addEventListener('click', async () => {
-    statusText.textContent = "Calculando nuevas rutas para vehículos del texto...";
-    setLoading(true);
-    try {
-      const data = await ejecutarConProgreso('/api/nuevas_rutas', {
-        texto: vehiculosInput?.value || "",
-        calidad: state.quality,
-        optimizacion: state.optim,
-        max_cand: parseInt(maxCandInput?.value || 12)
-      });
-      if (!data || !data.ok) {
-        statusText.textContent = `Error: ${data && data.error ? data.error : 'sin resultado'}`;
-        return;
-      }
-      state.vehiculos = data.vehiculos || state.vehiculos;
-      state.trayectorias = data.trayectorias || [];
-      state.frames = data.frames || [];
-      updateCombos();
-      statusText.textContent = "¡Simulación de nuevas rutas en curso!";
-      iniciarReproduccion(true);
-    } catch (err) {
-      statusText.textContent = `Error: ${err.message}`;
-    } finally {
-      setLoading(false);
-    }
-  });
 
   // --- Barra de acceso rápido (móvil): reutilizan las mismas acciones ---
   document.getElementById('q-insertar')?.addEventListener('click', generarVehiculos);

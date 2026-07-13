@@ -83,7 +83,7 @@ def _worker_simular(calidad, modo_opt, max_cand):
         base = mve.Reservas()
         trays, motivos = _ejecutar_planificacion(
             env_actual, vehiculos_actuales, indices, base, calidad, modo_opt, max_cand,
-            reubicable=True, inicios=None, progreso=_set_progreso)
+            reubicable=True, progreso=_set_progreso)
         for idx, v in enumerate(vehiculos_actuales):
             traj_data = trays.get(idx)
             if traj_data is not None:
@@ -102,54 +102,7 @@ def _worker_simular(calidad, modo_opt, max_cand):
         _sim_lock.release()
 
 
-def _worker_nuevas(lote, indices, inicios, base, k_inicio, calidad, modo_opt, max_cand):
-    try:
-        trays, motivos = _ejecutar_planificacion(
-            env_actual, vehiculos_actuales, indices, base, calidad, modo_opt, max_cand,
-            reubicable=False, inicios=inicios, progreso=_set_progreso)
-        for i in indices:
-            veh = vehiculos_actuales[i]
-            traj = trays.get(i)
-            if traj is None:
-                veh.mision_ok = False
-            else:
-                veh.mision_ok = True
-                base_traj = veh.traj if veh.traj else [veh.inicio]
-                ultima = base_traj[-1]
-                relleno = [ultima] * max(0, k_inicio - len(base_traj))
-                veh.traj = base_traj + relleno + traj[1:]
-                veh.dt_plan = mve.DT
-        _set_job(estado="done", progreso="Completado",
-                 resultado=_payload_nuevas(motivos), error=None)
-    except Exception as e:  # noqa: BLE001
-        import traceback
-        traceback.print_exc()
-        _set_job(estado="error", error=f"{type(e).__name__}: {e}")
-    finally:
-        _sim_lock.release()
-
-
-def _payload_nuevas(motivos):
-    payload = _payload_simular(motivos)
-    payload["vehiculos"] = [
-        {
-            "id": v.vid,
-            "inicio": [float(v.inicio[0]), float(v.inicio[1]), float(v.inicio[2])],
-            "meta": [float(v.meta[0]), float(v.meta[1])],
-            "meta_th": float(v.meta_th) if v.meta_th is not None else None,
-            "largo": float(v.length),
-            "ancho": float(v.width),
-            "grupo": int(getattr(v, "grupo", 1)),
-            "prioridad": int(getattr(v, "prioridad", 1)),
-            "color": mve.PALETA[idx % len(mve.PALETA)]
-        }
-        for idx, v in enumerate(vehiculos_actuales)
-    ]
-    return payload
-
-
 @app.route("/api/simular/estado", methods=["GET"])
-@app.route("/api/nuevas_rutas/estado", methods=["GET"])
 def planificacion_estado():
     return jsonify(_leer_job())
 
@@ -492,7 +445,7 @@ def _ruta_real(veh, traj):
 PLAZO_VEH_CAND = 5.0
 
 
-def _planificar_una_pasada(env, vehiculos, orden, base, inicios, pl,
+def _planificar_una_pasada(env, vehiculos, orden, base, pl,
                            reubicable, progreso, etiqueta="", deadline_dur=None):
     """Una pasada cooperativa sobre 'orden' (índices): planifica vehículo a
     vehículo y RESERVA cada uno como obstáculo (móvil si logra ruta, estático si
@@ -512,7 +465,6 @@ def _planificar_una_pasada(env, vehiculos, orden, base, inicios, pl,
     pref = (etiqueta + " · ") if etiqueta else ""
     for pos, i in enumerate(orden):
         veh = vehiculos[i]
-        ini = inicios.get(i) if inicios else None
         if CAP_NODOS is not None:
             pl.max_nodos = CAP_NODOS                  # presupuesto de nodos (memoria)
         pl.max_exp = 20_000_000                   # las expansiones no son el freno
@@ -520,8 +472,7 @@ def _planificar_una_pasada(env, vehiculos, orden, base, inicios, pl,
         # pose0: un bloqueo de meta ajena que SOLAPE el arranque del vehículo
         # se omite; si no, nace atrapado y da "sin_ruta" al instante.
         pl.bloqueos = mve.bloqueos_metas(
-            vehiculos, orden, excepto=i,
-            pose0=(ini if ini is not None else veh.inicio))
+            vehiculos, orden, excepto=i, pose0=veh.inicio)
         if progreso is not None:
             def _tick(expand, _p=pos, _vid=veh.vid, _n=len(orden), _pf=pref):
                 progreso(f"{_pf}Planificando vehículo {_p + 1}/{_n} (id {_vid}) · "
@@ -531,14 +482,14 @@ def _planificar_una_pasada(env, vehiculos, orden, base, inicios, pl,
             pl.tick = None
 
         _t0 = _t.perf_counter()
-        traj = pl.planificar(veh, reservas, inicio=ini)
+        traj = pl.planificar(veh, reservas)
         _dt = _t.perf_counter() - _t0
         motivos[i] = pl.motivo
         ok = _ruta_real(veh, traj)
         # REUBICACIÓN (modo aleatorio, como el escritorio): si el vehículo no
         # tiene salida donde nació, se le buscan extremos nuevos.
         intentos = 0
-        while (not ok and reubicable and inicios is None
+        while (not ok and reubicable
                and pl.motivo == "sin_ruta" and intentos < 12):
             if not _reubicar(env, veh, vehiculos):
                 break
@@ -568,7 +519,7 @@ def _planificar_una_pasada(env, vehiculos, orden, base, inicios, pl,
             # No llegó: queda APARCADO en su salida y sigue contando como
             # obstáculo (reserva estática) para los vehículos que van detrás.
             trays[i] = None
-            px, py, pth = ini if ini is not None else veh.inicio
+            px, py, pth = veh.inicio
             reservas.add([(px, py, pth)], veh.length, veh.width)
             coste += mve.PENAL_FALLO
     pl.tick = None
@@ -577,7 +528,7 @@ def _planificar_una_pasada(env, vehiculos, orden, base, inicios, pl,
 
 
 def _ejecutar_planificacion(env, vehiculos, indices, base, calidad, modo_opt, max_cand,
-                            reubicable=False, inicios=None, progreso=None):
+                            reubicable=False, progreso=None):
     """Planificación cooperativa de la flota (igual que el escritorio).
 
     Genera los ÓRDENES candidatos según el modo ("secuencial" da uno solo;
@@ -601,7 +552,7 @@ def _ejecutar_planificacion(env, vehiculos, indices, base, calidad, modo_opt, ma
     # sin límite de tiempo (solo el tope de nodos), como hasta ahora.
     if len(ordenes) <= 1:
         trays, motivos, _, _ = _planificar_una_pasada(
-            env, vehiculos, list(ordenes[0]), base, inicios, pl,
+            env, vehiculos, list(ordenes[0]), base, pl,
             reubicable, progreso)
         return trays, motivos
 
@@ -618,7 +569,7 @@ def _ejecutar_planificacion(env, vehiculos, indices, base, calidad, modo_opt, ma
             if progreso is not None:
                 progreso(f"Explorando {total} órdenes en paralelo (hornadas)…")
             res = mve.evaluar_ordenes_hornadas(
-                env, vehiculos, list(ordenes), base, inicios, cal_int,
+                env, vehiculos, list(ordenes), base, cal_int,
                 max_exp=None, progreso=progreso, sigue_vivo=None)
             if res is not None:
                 mejor = (res[0], res[1], list(res[4]))
@@ -635,7 +586,7 @@ def _ejecutar_planificacion(env, vehiculos, indices, base, calidad, modo_opt, ma
             if progreso is not None:
                 progreso(f"Explorando {etiqueta}…")
             _, _, fallos, coste = _planificar_una_pasada(
-                env, vehiculos, list(orden), base, inicios, pl,
+                env, vehiculos, list(orden), base, pl,
                 reubicable=False, progreso=progreso, etiqueta=etiqueta,
                 deadline_dur=PLAZO_VEH_CAND)
             if mejor is None or (fallos, coste) < (mejor[0], mejor[1]):
@@ -647,7 +598,7 @@ def _ejecutar_planificacion(env, vehiculos, indices, base, calidad, modo_opt, ma
     if progreso is not None:
         progreso("Planificando el mejor orden encontrado…")
     trays, motivos, _, _ = _planificar_una_pasada(
-        env, vehiculos, mejor[2], base, inicios, pl,
+        env, vehiculos, mejor[2], base, pl,
         reubicable, progreso, etiqueta="Mejor orden")
     return trays, motivos
 
@@ -675,84 +626,6 @@ def simular():
                      args=(calidad, modo_opt, max_cand), daemon=True).start()
     return jsonify({"ok": True, "estado": "running"})
 
-@app.route("/api/nuevas_rutas", methods=["POST"])
-def nuevas_rutas():
-    global env_actual, vehiculos_actuales
-    asegurar_warmup()
-    data = request.json or {}
-    texto = data.get("texto", "")
-    calidad = int(data.get("calidad", 3))
-    modo_opt = data.get("optimizacion", "secuencial")
-    max_cand = int(data.get("max_cand", 12))
-
-    if not vehiculos_actuales:
-        return jsonify({"ok": False, "error": "Primero genera y simula vehículos."}), 400
-
-    try:
-        especs = mve.parsear_especificaciones(texto)
-    except ValueError as e:
-        return jsonify({"ok": False, "error": str(e)}), 400
-
-    por_id = {v.vid: v for v in vehiculos_actuales}
-    lote = []
-    try:
-        for e in especs:
-            if e["id"] not in por_id:
-                raise ValueError(f"No existe ningún vehículo con id {e['id']!r}.")
-            if "inicio" in e or "giro_inicial" in e:
-                raise ValueError(f"Vehículo {e['id']!r}: en una misión nueva no se cambia 'inicio'/'giro_inicial'.")
-            if "largo" in e or "ancho" in e:
-                raise ValueError(f"Vehículo {e['id']!r}: el tamaño del vehículo no cambia en una misión nueva.")
-            if "meta" not in e:
-                raise ValueError(f"Vehículo {e['id']!r}: la misión nueva necesita 'meta'.")
-            veh = por_id[e["id"]]
-            mx, my = e["meta"]
-            px, py, pth = veh.pose_final
-            if "angulo_llegada" in e:
-                thm = e["angulo_llegada"]
-            else:
-                thm = math.atan2(my - py, mx - px)
-            th_plaza = thm if thm is not None else 0.0
-            if not env_actual.libre(mx, my, th_plaza, veh.length, veh.width, margen=0.15):
-                raise ValueError(f"Vehículo {e['id']!r}: la plaza nueva ({mx:g}, {my:g}) no cabe.")
-            lote.append((veh, e, thm))
-    except ValueError as e:
-        return jsonify({"ok": False, "error": str(e)}), 400
-
-    k_inicio = max(len(v.traj) if v.traj else 1 for v in vehiculos_actuales)
-    ids_lote = {veh.vid for veh, _, _ in lote}
-    base = mve.Reservas()
-    for v in vehiculos_actuales:
-        if v.vid not in ids_lote:
-            base.add([v.pose_final], v.length, v.width)
-
-    indices = []
-    inicios = {}
-    for veh, e, thm in lote:
-        veh.meta = tuple(e["meta"])
-        veh.meta_th = thm
-        if "grupo" in e:
-            veh.grupo = e["grupo"]
-        if "prioridad" in e:
-            veh.prioridad = e["prioridad"]
-        if "v_max" in e:
-            veh.v_max = e["v_max"]
-        if "a_max" in e:
-            veh.a_max = e["a_max"]
-        if "giro_max" in e:
-            veh.delta_max = e["giro_max"]
-        indices.append(veh.idx)
-        inicios[veh.idx] = veh.pose_final
-
-    if not _sim_lock.acquire(blocking=False):
-        return jsonify({"ok": False, "estado": "ocupado",
-                        "error": "Ya hay una simulación en curso."}), 409
-    _set_job(estado="running", progreso="Iniciando…", resultado=None, error=None)
-    threading.Thread(
-        target=_worker_nuevas,
-        args=(lote, indices, inicios, base, k_inicio, calidad, modo_opt, max_cand),
-        daemon=True).start()
-    return jsonify({"ok": True, "estado": "running"})
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5050))
