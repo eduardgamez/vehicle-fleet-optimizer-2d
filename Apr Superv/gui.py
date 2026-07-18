@@ -188,6 +188,15 @@ class App:
             fila[0] += 1
 
         sep()
+        ttk.Label(panel, text="Rutas guardadas", font=("", 11, "bold")).grid(
+            row=fila[0], column=0, columnspan=2, sticky="w")
+        fila[0] += 1
+        ttk.Button(panel, text="Ver rutas guardadas…",
+                   command=self._seguro(self.ver_rutas_guardadas)).grid(
+            row=fila[0], column=0, columnspan=2, sticky="ew", pady=1)
+        fila[0] += 1
+
+        sep()
         ttk.Button(panel, text="✕  Salir", command=self.root.destroy).grid(
             row=fila[0], column=0, columnspan=2, sticky="ew", pady=(1, 0))
         fila[0] += 1
@@ -561,7 +570,83 @@ class App:
         veh.meta_th = thm
         return True
 
+    # ----------------------- ver rutas guardadas ------------------------- #
+    def ver_rutas_guardadas(self):
+        """Abre un selector con los escenarios guardados en rutas/ y reproduce el
+        elegido, cargando su mapa fijo para que el fondo coincida."""
+        tk = self.tk
+        from tkinter import ttk, messagebox
+        runs = listar_runs()
+        if not runs:
+            messagebox.showinfo("Sin rutas guardadas",
+                "No hay escenarios en la carpeta rutas/. Genera algunos con "
+                "generador.py (o «Calcular y simular» en modo clásico).")
+            return
 
+        win = tk.Toplevel(self.root)
+        win.title("Rutas guardadas")
+        win.transient(self.root)
+        ttk.Label(win, text="Selecciona un escenario y pulsa «Reproducir»:",
+                  padding=8).grid(row=0, column=0, columnspan=2, sticky="w")
+        marco = ttk.Frame(win, padding=(8, 0, 8, 8))
+        marco.grid(row=1, column=0, columnspan=2, sticky="nsew")
+        scroll = ttk.Scrollbar(marco, orient="vertical")
+        lista = tk.Listbox(marco, width=64, height=16, font=("Menlo", 9),
+                           yscrollcommand=scroll.set)
+        scroll.config(command=lista.yview)
+        lista.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+        for arch, rid, nveh in runs:
+            try:
+                nombre = os.path.relpath(arch, RUTAS_DIR)
+            except ValueError:
+                nombre = os.path.basename(arch)
+            lista.insert("end", f"{nveh} veh  ·  {nombre}  ·  run {rid}")
+        lista.selection_set(0)
+
+        def reproducir_sel(*_):
+            sel = lista.curselection()
+            if not sel:
+                return
+            arch, rid, _ = runs[sel[0]]
+            win.destroy()
+            self._reproducir_run(arch, rid)
+
+        lista.bind("<Double-Button-1>", self._seguro(reproducir_sel))
+        botones = ttk.Frame(win, padding=(8, 0, 8, 8))
+        botones.grid(row=2, column=0, columnspan=2, sticky="ew")
+        ttk.Button(botones, text="▶  Reproducir",
+                   command=self._seguro(reproducir_sel)).pack(side="left")
+        ttk.Button(botones, text="Cerrar", command=win.destroy).pack(side="right")
+
+    def _reproducir_run(self, archivo, run_id):
+        """Carga un escenario del CSV, pone su mapa de fondo y lo reproduce."""
+        from tkinter import messagebox
+        self._detener()
+        # El mapa fijo con el que se generaron las rutas está en la RAÍZ del
+        # proyecto (junto a multi_v_evo.py); se carga para que el fondo coincida.
+        raiz = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        ruta_mapa = os.path.join(raiz, "mapas", "mapa_entrenamiento.json")
+        if os.path.exists(ruta_mapa):
+            try:
+                cargar_mapa_en(self.env, ruta_mapa)
+                self._actualizar_densidad()
+            except Exception:
+                pass                         # sin fondo correcto, pero se ve la ruta
+        try:
+            self.vehiculos = cargar_run(archivo, run_id)
+        except Exception as e:  # noqa: BLE001
+            messagebox.showerror("No se pudo cargar la ruta",
+                                 f"{type(e).__name__}: {e}")
+            return
+        self.frames = construir_frames(self.vehiculos)
+        self._dibujar_estatico()
+        ok = sum(1 for v in self.vehiculos if v.mision_ok)
+        self.estado.set(f"Run {run_id}: {ok}/{len(self.vehiculos)} vehículos con "
+                        f"ruta ({len(self.frames)} fotogramas). Reproduciendo…")
+        self.frame = 0
+        self.reproduciendo = True
+        self._anim()
 
     # --------------------------- planificación --------------------------- #
     def calcular_y_simular(self):
@@ -611,7 +696,8 @@ class App:
             self.estado.set("Cargando modelo y simulando con la red…")
             self.root.update()
             politica = Politica.cargar()
-            llegados = rollout_flota(self.vehiculos, politica)
+            llegados = rollout_flota(self.vehiculos, politica,
+                                     opt=self.opt.get())
         except Exception as e:  # noqa: BLE001
             messagebox.showerror("Error en el modo IA",
                                  f"{type(e).__name__}: {e}")
@@ -797,7 +883,7 @@ class App:
         # 6 parámetros + control de 2) al CSV acumulado, descargable de /rutas.
         try:
             n_filas = guardar_dataset_supervisado(
-                [self.vehiculos[i] for i in indices])
+                [self.vehiculos[i] for i in indices], opt=self.opt.get())
             if n_filas:
                 print(f"[dataset] +{n_filas} muestras → {DATASET_CSV}")
         except Exception as e:      # nunca debe tumbar la ejecución de la ruta

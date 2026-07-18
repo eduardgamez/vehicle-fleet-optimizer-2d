@@ -1862,7 +1862,7 @@ class Planificador:
             2: (23, 11, 1.6, 1650000, 0.3665,  98_000, 154_000,    680_000,  35_000),
             3: (31, 10, 1.3, 2400000, 0.2967, 112_000, 176_000,  1_025_000,  40_000),
             4: (41,  8, 1.1, 3600000, 0.2269, 140_000, 221_000,  1_845_000,  50_000),
-            5: (55,  6, 1.0, 5400000, 0.12,   350_000, 350_000,  7_818_000, 120_000),
+            5: (55,  6, 1.1, 5400000, 0.12,   350_000, 350_000,  7_818_000, 120_000),
         }
         (n_dir, ang, peso, mx, a_max, r_ini_g, r_span1_g,
          r_span2_g, plazo_mejora_g) = tabla.get(int(nivel), tabla[3])
@@ -3276,9 +3276,11 @@ def veh_a_dict(veh):
     }
 
 
-def guardar_dataset_supervisado(vehiculos, ruta=DATASET_CSV):
+def guardar_dataset_supervisado(vehiculos, ruta=DATASET_CSV, opt="secuencial"):
     """Añade al CSV las muestras de todas las rutas definitivas con misión OK.
-    Crea la carpeta y la cabecera la primera vez. Devuelve el nº de filas escritas."""
+    Crea la carpeta y la cabecera la primera vez. Devuelve el nº de filas escritas.
+    'opt' es el modo de optimización de flota del escenario; se guarda en la línea
+    de comentario del run para que el entrenamiento lo use como entrada de la red."""
     ok = [v for v in vehiculos if getattr(v, "mision_ok", False) and v.traj]
     filas = []
     for veh in ok:
@@ -3297,11 +3299,95 @@ def guardar_dataset_supervisado(vehiculos, ruta=DATASET_CSV):
     with open(ruta, "a", encoding="utf-8") as f:
         if nuevo:
             f.write("run,vid,instante,x1,y1,x2,y2,v,theta,a,giro\n")
-        f.write(f"# run={run} condiciones_iniciales={condiciones}\n")
+        f.write(f"# run={run} opt={opt} condiciones_iniciales={condiciones}\n")
         for vid, i, x1, y1, x2, y2, v, th, a, giro in filas:
             f.write(f"{run},{vid},{i},{x1:.6f},{y1:.6f},{x2:.6f},{y2:.6f},"
                     f"{v:.6f},{th:.6f},{a:.6f},{giro:.6f}\n")
     return len(filas)
+
+
+# --------------------------------------------------------------------------- #
+# LECTURA del dataset: reconstruir escenarios guardados para verlos en la GUI
+# --------------------------------------------------------------------------- #
+def _parsear_condiciones_linea(linea):
+    """De una línea '# run=<id> condiciones_iniciales=[...]' devuelve
+    (run_id, lista_de_diccionarios) con los diccionarios TAL CUAL se guardaron
+    (ángulos en grados, mismo formato que la entrada de texto)."""
+    run_id = linea.split("run=", 1)[1].split()[0]
+    conds = ast.literal_eval(linea.split("condiciones_iniciales=", 1)[1])
+    return run_id, conds
+
+
+def listar_runs(carpeta=RUTAS_DIR):
+    """Recorre los CSV bajo 'carpeta' (recursivo) y devuelve la lista de
+    escenarios guardados como [(archivo, run_id, n_vehiculos), ...]."""
+    import glob
+    out = []
+    for arch in sorted(glob.glob(os.path.join(carpeta, "**", "*.csv"),
+                                 recursive=True)):
+        try:
+            with open(arch, encoding="utf-8") as f:
+                for linea in f:
+                    if linea.startswith("# run="):
+                        try:
+                            rid, conds = _parsear_condiciones_linea(linea.strip())
+                            out.append((arch, rid, len(conds)))
+                        except Exception:
+                            pass                 # comentario corrupto: se salta
+        except OSError:
+            pass
+    return out
+
+
+def cargar_run(archivo, run_id):
+    """Reconstruye los Vehiculo de un escenario guardado (con veh.traj poblado
+    desde las filas del CSV) para reproducirlo. No valida contra el entorno: la
+    trayectoria ya se calculó al generarla; el centro del vehículo en cada
+    instante es el punto medio de las dos esquinas opuestas del OBB."""
+    conds = None
+    filas = {}                                   # vid -> [(instante, cx, cy, th)]
+    activo = False
+    with open(archivo, encoding="utf-8") as f:
+        for linea in f:
+            s = linea.strip()
+            if not s or s.startswith("run,"):
+                continue
+            if s.startswith("# run="):
+                rid, c = _parsear_condiciones_linea(s)
+                if rid == run_id:
+                    conds, activo = c, True
+                elif activo:
+                    break                        # se acabó el run buscado
+                continue
+            if not activo:
+                continue
+            p = s.split(",")
+            vid = int(p[1]); inst = int(p[2])
+            x1, y1, x2, y2 = map(float, p[3:7])
+            th = float(p[8])
+            filas.setdefault(vid, []).append(
+                (inst, (x1 + x2) / 2.0, (y1 + y2) / 2.0, th))
+    if conds is None:
+        raise ValueError(f"No se encontró el run {run_id!r} en {archivo}.")
+    # Las condiciones están en grados (formato de texto): el parser las normaliza
+    # a radianes y valida rangos, sin comprobar el mapa.
+    especs = parsear_especificaciones(repr(conds))
+    vehiculos = []
+    for idx, e in enumerate(especs):
+        th0 = e.get("giro_inicial", 0.0)
+        veh = Vehiculo(idx, (e["inicio"][0], e["inicio"][1], th0), e["meta"],
+                       length=e.get("largo", VEH_LEN), width=e.get("ancho", VEH_WID),
+                       v_max=e.get("v_max", VEH_VMAX), a_max=e.get("a_max", VEH_AMAX),
+                       giro_max=e.get("giro_max"),
+                       meta_th=e.get("angulo_llegada"),
+                       grupo=e.get("grupo", 1), prioridad=e.get("prioridad", 1),
+                       vid=e["id"], v_inicial=e.get("v_inicial", 0.0))
+        pasos = sorted(filas.get(e["id"], []))
+        veh.traj = [(cx, cy, th) for _, cx, cy, th in pasos]
+        veh.mision_ok = len(veh.traj) >= 2
+        veh.dt_plan = DT
+        vehiculos.append(veh)
+    return vehiculos
 
 
 # --------------------------------------------------------------------------- #

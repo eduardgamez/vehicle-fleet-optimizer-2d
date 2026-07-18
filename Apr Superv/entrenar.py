@@ -22,8 +22,16 @@ import ast
 import glob
 import math
 import os
+import sys
 import time
 import zlib
+
+# La consola de Windows suele ser cp1252 y no puede imprimir algunos símbolos;
+# forzar UTF-8 en la salida evita que un print tumbe el entrenamiento.
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+except (AttributeError, ValueError):
+    pass
 
 import numpy as np
 
@@ -57,20 +65,21 @@ def _parsear_condiciones(linea):
 
 def leer_runs(carpeta):
     """Recorre los CSV y devuelve una lista de runs:
-    (clave_run, condiciones, {vid: array (n, 6) de [x, y, th, v, a, giro]})."""
+    (clave_run, condiciones, modo_opt, {vid: array (n, 6) de [x, y, th, v, a, giro]})."""
     archivos = sorted(glob.glob(os.path.join(carpeta, "**", "*.csv"),
                                 recursive=True))
     runs = []
     for arch in archivos:
         conds, filas = None, {}
         run_actual = None
+        opt_actual = "secuencial"
 
         def cerrar():
             if conds and filas:
                 datos = {vid: np.array(v, dtype=np.float64)
                          for vid, v in filas.items()}
                 runs.append((f"{os.path.basename(arch)}::{run_actual}",
-                             conds, datos))
+                             conds, opt_actual, datos))
 
         with open(arch, encoding="utf-8") as f:
             for linea in f:
@@ -84,6 +93,8 @@ def leer_runs(carpeta):
                         try:
                             conds = _parsear_condiciones(linea)
                             run_actual = linea.split("run=", 1)[1].split()[0]
+                            opt_actual = ("secuencial" if "opt=" not in linea
+                                          else linea.split("opt=", 1)[1].split()[0])
                         except Exception:
                             conds = None          # comentario corrupto: se salta
                     continue
@@ -106,8 +117,9 @@ def leer_runs(carpeta):
 # --------------------------------------------------------------------------- #
 def construir_muestras(runs):
     X, Y = [], []
-    for _, conds, datos in runs:
+    for _, conds, opt, datos in runs:
         vids = [vid for vid in datos if vid in conds]
+        n_veh = len(vids)               # tamaño de la flota vista en este run
         for vid in vids:
             arr = datos[vid]
             p = conds[vid]
@@ -120,7 +132,8 @@ def construir_muestras(runs):
                        "v_max": p["v_max"], "a_max": p["a_max"],
                        "giro_max": p["giro_max"], "grupo": p["grupo"],
                        "prioridad": p["prioridad"], "meta": p["meta"],
-                       "meta_th": p["meta_th"], "pasado": pasado}
+                       "meta_th": p["meta_th"], "pasado": pasado,
+                       "opt": opt, "n_veh": n_veh}
                 otros = []
                 for ov in vids:
                     if ov == vid:
@@ -132,6 +145,7 @@ def construir_muestras(runs):
                         ox, oy, oth, ovel = oa[-1, 0], oa[-1, 1], oa[-1, 2], 0.0
                     otros.append({"x": ox, "y": oy, "th": oth, "v": ovel,
                                   "largo": op["largo"], "ancho": op["ancho"],
+                                  "v_max": op["v_max"],
                                   "grupo": op["grupo"],
                                   "prioridad": op["prioridad"]})
                 X.append(vector_entrada(ego, otros))
@@ -229,7 +243,7 @@ def main():
                 "media": media.tolist(), "escala": escala.tolist(),
                 "state_dict": red.state_dict(),
             }, args.salida)
-            marca = "  ← guardado"
+            marca = "  <- guardado"
         print(f"[train] época {ep:3d}/{args.epocas} · "
               f"train {tot / len(Xtr_t):.5f} · val {lv:.5f} · "
               f"{time.perf_counter() - t0:.1f} s{marca}")

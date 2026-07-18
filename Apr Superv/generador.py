@@ -21,7 +21,6 @@ Ejemplos:
 """
 
 import argparse
-import json
 import math
 import os
 import random
@@ -30,37 +29,20 @@ from concurrent.futures import ProcessPoolExecutor
 import multiprocessing
 
 from nucleo import (
-    W, H, DT, CAP_COMPLETO, PLAZO_VEH_CAND, MAPAS_DIR, RUTAS_DIR, PALETA,
+    W, H, DT, CAP_COMPLETO, PLAZO_VEH_CAND, RUTAS_DIR, PALETA,
     Entorno, Planificador, Reservas,
-    espec_a_vehiculo, generar_ordenes, planificar_orden, bloqueos_metas,
+    parsear_especificaciones, espec_a_vehiculo, generar_ordenes,
+    planificar_orden, bloqueos_metas,
     guardar_dataset_supervisado, cargar_mapa_en, warmup,
 )
+from politica import MODOS_OPT
 
-MAPA_ENTRENAMIENTO = os.path.join(MAPAS_DIR, "mapa_entrenamiento.json")
-SEMILLA_MAPA = 20260718        # el mapa fijo se genera SIEMPRE con esta semilla
-
-
-# --------------------------------------------------------------------------- #
-# Mapa fijo de entrenamiento
-# --------------------------------------------------------------------------- #
-def asegurar_mapa(ruta, densidad):
-    """Devuelve la ruta de un mapa fijo, creándolo (determinista) si no existe."""
-    if os.path.exists(ruta):
-        return ruta
-    estado = random.getstate()
-    random.seed(SEMILLA_MAPA)
-    env = Entorno()
-    env.generar(densidad)
-    random.setstate(estado)
-    os.makedirs(os.path.dirname(ruta), exist_ok=True)
-    datos = {"version": 1, "mundo": [W, H],
-             "obstaculos": [[[float(px), float(py)] for px, py in pol]
-                            for pol in env.obstaculos]}
-    with open(ruta, "w", encoding="utf-8") as f:
-        json.dump(datos, f)
-    print(f"[mapa] creado el mapa fijo de entrenamiento → {ruta} "
-          f"({len(datos['obstaculos'])} obstáculos)")
-    return ruta
+# Mapa FIJO de entrenamiento: el que ya está guardado y versionado en el
+# proyecto (mapas/mapa_entrenamiento.json, en la raíz, junto a multi_v_evo.py).
+# No se genera ninguno automáticamente: si no existe, el generador se detiene.
+RAIZ_PROYECTO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+MAPA_ENTRENAMIENTO = os.path.join(RAIZ_PROYECTO, "mapas",
+                                  "mapa_entrenamiento.json")
 
 
 # --------------------------------------------------------------------------- #
@@ -227,13 +209,21 @@ def trabajar(args):
     for k, sem in enumerate(semillas):
         random.seed(sem)
         n = random.randint(veh_min, veh_max)
+        # El modo de optimización varía POR ESCENARIO cuando opt="mixto" (los 3
+        # modos mezclados): se guarda con cada run y la red lo recibe como entrada.
+        modo = random.choice(MODOS_OPT) if opt == "mixto" else opt
         especs = aleatorios_spec(env, n)
         if especs is None:
             saltados += 1
             continue
-        vehiculos = [espec_a_vehiculo(e, i, env) for i, e in enumerate(especs)]
+        # Los especs de aleatorios_spec están en GRADOS (formato de texto): hay
+        # que pasarlos por el parser —igual que la GUI— para normalizarlos a
+        # radianes antes de crear los Vehiculo. Saltárselo hacía que giro_inicial,
+        # angulo_llegada y giro_max se interpretaran como radianes.
+        normal = parsear_especificaciones(repr(especs))
+        vehiculos = [espec_a_vehiculo(e, i, env) for i, e in enumerate(normal)]
         t0 = time.perf_counter()
-        trays, motivos = planificar_flota(env, pl, vehiculos, opt, max_cand)
+        trays, motivos = planificar_flota(env, pl, vehiculos, modo, max_cand)
         for i, veh in enumerate(vehiculos):
             traj = trays.get(i)
             veh.traj = traj if traj is not None else []
@@ -243,8 +233,8 @@ def trabajar(args):
         # fichero por (calidad, modo de optimización, worker).
         ruta_csv = os.path.join(
             salida, f"nveh_{n:02d}",
-            f"dataset_c{calidad}_{opt}_w{os.getpid()}.csv")
-        filas = guardar_dataset_supervisado(vehiculos, ruta_csv)
+            f"dataset_c{calidad}_{modo}_w{os.getpid()}.csv")
+        filas = guardar_dataset_supervisado(vehiculos, ruta_csv, opt=modo)
         filas_tot += filas
         ok = sum(1 for v in vehiculos if v.mision_ok)
         veh_ok += ok
@@ -269,8 +259,9 @@ def main():
     ap.add_argument("--calidad", type=int, default=3, choices=range(1, 6),
                     help="calidad de ruta 1-5 (def. 3)")
     ap.add_argument("--opt", default="secuencial",
-                    choices=("secuencial", "global", "prioridades"),
-                    help="modo de optimización de flota (def. secuencial)")
+                    choices=("secuencial", "global", "prioridades", "mixto"),
+                    help="modo de optimización de flota; 'mixto' elige uno al "
+                         "azar por escenario (def. secuencial)")
     ap.add_argument("--max-ordenes", type=int, default=12,
                     help="órdenes candidatos máx. en global/prioridades (def. 12)")
     ap.add_argument("--workers", type=int,
@@ -279,10 +270,8 @@ def main():
     ap.add_argument("--semilla", type=int, default=0,
                     help="semilla base; escenario i usa semilla+i (def. 0)")
     ap.add_argument("--mapa", default=MAPA_ENTRENAMIENTO,
-                    help="mapa JSON fijo (def. mapas/mapa_entrenamiento.json, "
-                         "se crea determinista si no existe)")
-    ap.add_argument("--dens", type=float, default=0.0,
-                    help="densidad de obstáculos extra si hay que crear el mapa")
+                    help="mapa JSON fijo ya guardado "
+                         "(def. mapas/mapa_entrenamiento.json)")
     ap.add_argument("--salida", default=RUTAS_DIR,
                     help="carpeta raíz de los CSV (def. rutas/)")
     args = ap.parse_args()
@@ -291,7 +280,12 @@ def main():
     veh_min = max(1, int(veh_min))
     veh_max = min(len(PALETA), int(veh_max or veh_min))
 
-    ruta_mapa = asegurar_mapa(args.mapa, args.dens)
+    ruta_mapa = args.mapa
+    if not os.path.exists(ruta_mapa):
+        raise SystemExit(
+            f"No existe el mapa {ruta_mapa}. Guarda uno desde la interfaz "
+            "(o coloca el JSON ahí) y vuelve a ejecutar; el generador no "
+            "crea mapas automáticamente.")
     semillas = list(range(args.semilla, args.semilla + args.escenarios))
     n_workers = max(1, min(args.workers, len(semillas)))
 

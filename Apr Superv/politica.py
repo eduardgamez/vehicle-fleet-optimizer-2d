@@ -9,8 +9,13 @@ La red recibe, por vehículo y por instante, un vector con:
   · la meta (en el sistema de referencia del propio vehículo) y el ángulo de
     llegada exigido,
   · los últimos H_PASADO controles aplicados (a, giro), normalizados,
-  · los N_VECINOS vehículos más cercanos: pose y velocidad relativas, tamaño y
-    si tienen mayor o menor preferencia (grupo, prioridad).
+  · los vehículos vecinos RELEVANTES (hasta N_VECINOS): un vehículo entra solo
+    si, yendo ambos a su velocidad máxima en línea recta el uno hacia el otro,
+    podrían colisionar dentro de HORIZONTE_VECINO iteraciones; de cada uno se da
+    pose y velocidad relativas, tamaño y preferencia (grupo/prioridad),
+  · el CONTEXTO del escenario (igual para toda la flota): el modo de optimización
+    elegido por el usuario (secuencial/global/prioridades, one-hot) y el nº de
+    vehículos de la flota, para que la red aprenda a comportarse según ellos.
 y predice los próximos N_PRED pares (a, giro) NORMALIZADOS por (a_max, giro_max)
 del propio vehículo. El mapa NO se codifica: la red se entrena y se usa siempre
 sobre el mismo mapa (entorno controlado), así que lo aprende implícitamente de
@@ -31,12 +36,29 @@ from nucleo import DT, W, H, ang_norm
 # ----------------------------- hiperparámetros ----------------------------- #
 N_PRED = 10        # pasos futuros (a, giro) que predice la red de una vez
 H_PASADO = 10      # controles pasados que ve como entrada
-N_VECINOS = 5      # vehículos vecinos más cercanos incluidos en la entrada
+# Vecinos: TOPE de vehículos incluidos y HORIZONTE del filtro de relevancia.
+# Un vecino entra solo si su "tiempo de cierre" —la distancia entre bordes
+# dividida por la suma de sus v_max, es decir el mínimo tiempo físico para que
+# ambos, a tope y el uno hacia el otro, lleguen a tocarse— es <= HORIZONTE_VECINO
+# iteraciones (× DT segundos). Debe ser >= N_PRED (10, los pasos que se
+# predicen); 20 añade margen. Ambos son ajustables como hiperparámetros de red
+# (equilibrio calidad/cómputo): más vecinos y más horizonte ven más contexto
+# pero engordan la entrada.
+N_VECINOS = 10
+HORIZONTE_VECINO = 20
 
 DIM_EGO = 10       # x, y, sinθ, cosθ, v, largo, ancho, v_max, a_max, giro_max
 DIM_META = 6       # meta en ejes propios (dx, dy), dist, sin/cos Δθ_llegada, libre
 DIM_VECINO = 10    # dx, dy, dist, sinΔθ, cosΔθ, v, largo, ancho, pref, presente
-DIM_ENTRADA = DIM_EGO + DIM_META + 2 * H_PASADO + DIM_VECINO * N_VECINOS
+
+# CONTEXTO DE ESCENARIO: preferencias del usuario que influyen en la forma de las
+# rutas y que son iguales para todos los vehículos e instantes del mismo run.
+# La red las recibe como entrada para aprender a comportarse según ellas.
+MODOS_OPT = ("secuencial", "global", "prioridades")   # one-hot del modo de flota
+DIM_CTX = len(MODOS_OPT) + 1   # one-hot del modo + nº de vehículos (saturado)
+
+DIM_ENTRADA = (DIM_EGO + DIM_META + 2 * H_PASADO + DIM_VECINO * N_VECINOS
+               + DIM_CTX)
 
 MODELO_PT = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                          "modelos", "politica.pt")
@@ -87,32 +109,71 @@ def vector_entrada(ego, otros):
         out[off + 2 * j] = a / max(ego["a_max"], 1e-6)
         out[off + 2 * j + 1] = g / max(ego["giro_max"], 1e-6)
 
-    # Vecinos más cercanos (con padding y bandera de presencia).
+    # Vecinos RELEVANTES por TIEMPO DE CIERRE: un vecino entra solo si, yendo
+    # ambos a su v_max en línea recta el uno hacia el otro, podrían tocarse
+    # dentro de HORIZONTE_VECINO iteraciones (t_cierre <= umbral). Se ordenan por
+    # urgencia (t_cierre ascendente) y se toman hasta N_VECINOS; los huecos
+    # restantes quedan a cero con la bandera de presencia (última) en 0, así que
+    # "menos de N_VECINOS cerca" se representa de forma natural.
     base = DIM_EGO + DIM_META + 2 * H_PASADO
     clave_ego = (ego.get("grupo", 1), ego.get("prioridad", 1))
-    vecinos = sorted(otros, key=lambda o: (o["x"] - x) ** 2 + (o["y"] - y) ** 2)
-    for j, o in enumerate(vecinos[:N_VECINOS]):
+    umbral = HORIZONTE_VECINO * DT
+    radio_ego = 0.5 * math.hypot(ego["largo"], ego["ancho"])
+    relevantes = []
+    for o in otros:
         dx, dy = o["x"] - x, o["y"] - y
+        dist = math.hypot(dx, dy)
+        # Distancia entre BORDES (aprox. por los radios de cada OBB) y tiempo de
+        # cierre en el peor caso: ambos a v_max, directos el uno al otro.
+        holgura = max(0.0, dist - radio_ego
+                      - 0.5 * math.hypot(o["largo"], o["ancho"]))
+        v_cierre = ego["v_max"] + o["v_max"]
+        t_cierre = holgura / v_cierre if v_cierre > 1e-6 else 0.0
+        if t_cierre <= umbral:
+            relevantes.append((t_cierre, dx, dy, dist, o))
+    # Orden por tiempo de cierre (más urgente primero): solo fija a qué slot va
+    # cada vecino, para que la entrada sea determinista; no es una característica.
+    relevantes.sort(key=lambda r: r[0])
+    for j, (t_cierre, dx, dy, dist, o) in enumerate(relevantes[:N_VECINOS]):
         dth = ang_norm(o["th"] - th)
         clave_o = (o.get("grupo", 1), o.get("prioridad", 1))
         # Menor (grupo, prioridad) → planifica antes → tiene preferencia.
         pref = 1.0 if clave_o < clave_ego else (-1.0 if clave_o > clave_ego
                                                 else 0.0)
         k = base + DIM_VECINO * j
-        out[k:k + DIM_VECINO] = (dx * c + dy * s, -dx * s + dy * c,
-                                 math.hypot(dx, dy), math.sin(dth),
-                                 math.cos(dth), o["v"], o["largo"], o["ancho"],
-                                 pref, 1.0)
+        out[k:k + DIM_VECINO] = (dx * c + dy * s, -dx * s + dy * c, dist,
+                                 math.sin(dth), math.cos(dth), o["v"],
+                                 o["largo"], o["ancho"], pref, 1.0)
+
+    # Contexto de ESCENARIO (constante en todo el run): modo de optimización de
+    # flota elegido por el usuario (one-hot) y nº de vehículos de la flota. El nº
+    # se deduce de 'otros' (que aquí es la lista COMPLETA de compañeros, antes del
+    # filtro de vecinos) salvo que se pase explícito en el ego.
+    base = DIM_ENTRADA - DIM_CTX
+    modo = ego.get("opt", "secuencial")
+    if modo in MODOS_OPT:
+        out[base + MODOS_OPT.index(modo)] = 1.0
+    n_veh = ego.get("n_veh")
+    if n_veh is None:
+        n_veh = len(otros) + 1
+    # Nº de vehículos por una función SATURANTE y sin parámetros: 1 - 1/n mapea
+    # [1, ∞) → [0, 1) de forma monótona, sin imponer un máximo, con la mayor
+    # resolución en flotas pequeñas (donde el nº de compañeros aún importa) y
+    # saturando cuando ya solo cuenta la densidad local (que ven los vecinos).
+    out[base + len(MODOS_OPT)] = 1.0 - 1.0 / max(1, n_veh)
     return out
 
 
-def vehiculo_a_ego(veh, x, y, th, v, pasado):
-    """dict 'ego' de vector_entrada a partir de un Vehiculo y su estado actual."""
+def vehiculo_a_ego(veh, x, y, th, v, pasado, opt="secuencial", n_veh=None):
+    """dict 'ego' de vector_entrada a partir de un Vehiculo y su estado actual.
+    'opt' es el modo de optimización de flota del escenario y 'n_veh' el nº de
+    vehículos de la flota (si None, se deduce de los compañeros en el vector)."""
     return {"x": x, "y": y, "th": th, "v": v,
             "largo": veh.length, "ancho": veh.width,
             "v_max": veh.v_max, "a_max": veh.a_max, "giro_max": veh.delta_max,
             "grupo": veh.grupo, "prioridad": veh.prioridad,
-            "meta": veh.meta, "meta_th": veh.meta_th, "pasado": pasado}
+            "meta": veh.meta, "meta_th": veh.meta_th, "pasado": pasado,
+            "opt": opt, "n_veh": n_veh}
 
 
 # --------------------------------------------------------------------------- #
@@ -169,7 +230,7 @@ class Politica:
 # --------------------------------------------------------------------------- #
 # Despliegue en bucle cerrado sobre una flota (mismo modelo de bicicleta)
 # --------------------------------------------------------------------------- #
-def rollout_flota(vehiculos, politica, t_max=180.0):
+def rollout_flota(vehiculos, politica, t_max=180.0, opt="secuencial"):
     """Simula la flota entera con la red: cada N_PRED pasos consulta la red (una
     pasada por vehículo activo, en lote) y aplica los controles predichos con el
     modelo de bicicleta. Escribe veh.traj y veh.mision_ok; devuelve el nº de
@@ -195,12 +256,14 @@ def rollout_flota(vehiculos, politica, t_max=180.0):
                           "th": est[j]["th"], "v": est[j]["v"],
                           "largo": vehiculos[j].length,
                           "ancho": vehiculos[j].width,
+                          "v_max": vehiculos[j].v_max,
                           "grupo": vehiculos[j].grupo,
                           "prioridad": vehiculos[j].prioridad}
                          for j in range(n) if j != i]
                 obs.append(vector_entrada(
                     vehiculo_a_ego(vehiculos[i], e["x"], e["y"], e["th"],
-                                   e["v"], e["pasado"]), otros))
+                                   e["v"], e["pasado"], opt=opt, n_veh=n),
+                    otros))
             pred = politica.predecir_lote(obs)
             for k, i in enumerate(activos):
                 planes[i] = pred[k]
