@@ -226,3 +226,7 @@ __marimo__/
 # Mapas generados localmente
 mapas/*
 !mapas/.gitkeep
+
+# Datasets de rutas generados localmente (aprendizaje supervisado)
+Apr Superv/rutas/*.csv
+!Apr Superv/rutas/.gitkeep
