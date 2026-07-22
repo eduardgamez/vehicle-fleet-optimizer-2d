@@ -34,6 +34,10 @@ class App:
         self.vehiculos = []
         self.frames = []
         self.frame = 0
+        # Cuando es True, la ruta se dibuja solo hasta el fotograma actual (traza
+        # que crece con el vehículo); en el modo IA, para mostrar que la red va
+        # decidiendo el camino sobre la marcha, no de golpe.
+        self.ruta_progresiva = False
         self.anim_id = None
         self.reproduciendo = False
         self._warmed = False
@@ -640,6 +644,7 @@ class App:
                                  f"{type(e).__name__}: {e}")
             return
         self.frames = construir_frames(self.vehiculos)
+        self.ruta_progresiva = False
         self._dibujar_estatico()
         ok = sum(1 for v in self.vehiculos if v.mision_ok)
         self.estado.set(f"Run {run_id}: {ok}/{len(self.vehiculos)} vehículos con "
@@ -705,6 +710,7 @@ class App:
         finally:
             self._ocupado = False
         self.frames = construir_frames(self.vehiculos)
+        self.ruta_progresiva = True
         self._dibujar_estatico()
         self.estado.set(f"IA: {llegados}/{len(self.vehiculos)} vehículos llegan "
                         f"a su meta ({len(self.frames)} fotogramas). "
@@ -907,6 +913,7 @@ class App:
             return
 
         self.frames = construir_frames(self.vehiculos)
+        self.ruta_progresiva = False
         avisos = []
         if sin_ruta:
             avisos.append(f"{sin_ruta} sin ruta (no existe)")
@@ -1009,11 +1016,14 @@ class App:
                              width=1, dash=(3, 3))
 
     def _rutas(self):
+        # En modo progresivo se traza solo hasta la pose del fotograma actual
+        # (índice de traj = índice de fotograma, ambos muestreados a DT).
+        lim = self.frame + 1 if self.ruta_progresiva else None
         for veh in self.vehiculos:
             if veh.traj:
                 col = PALETA[veh.idx % len(PALETA)]
                 pts = []
-                for x, y, _ in veh.traj:
+                for x, y, _ in (veh.traj[:lim] if lim is not None else veh.traj):
                     pts.extend((x * SCALE, y * SCALE))
                 if len(pts) >= 4:
                     self.canvas.create_line(pts, fill=col, width=1, smooth=True)

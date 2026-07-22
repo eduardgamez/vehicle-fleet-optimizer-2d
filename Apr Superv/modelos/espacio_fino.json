@@ -1,0 +1,15 @@
+{
+  "n_capas": [3, 4],
+  "oculto": [512, 1024],
+  "dropout": [0.0, 0.1],
+  "activacion": ["gelu", "silu"],
+  "lr": [0.002, 0.003, 0.005, 0.008],
+  "lote": [256, 512],
+  "n_vecinos": [1, 2, 3],
+  "h_pasado": [2, 3, 5],
+  "horizonte": [15],
+  "epocas": [80, 120],
+  "weight_decay": [0.01],
+  "normalizacion": ["no", "layernorm"],
+  "optimizador": ["adamw"]
+}

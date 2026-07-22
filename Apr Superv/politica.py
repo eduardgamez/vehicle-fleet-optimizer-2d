@@ -11,8 +11,10 @@ La red recibe, por vehículo y por instante, un vector con:
   · los últimos H_PASADO controles aplicados (a, giro), normalizados,
   · los vehículos vecinos RELEVANTES (hasta N_VECINOS): un vehículo entra solo
     si, yendo ambos a su velocidad máxima en línea recta el uno hacia el otro,
-    podrían colisionar dentro de HORIZONTE_VECINO iteraciones; de cada uno se da
-    pose y velocidad relativas, tamaño y preferencia (grupo/prioridad),
+    podrían colisionar dentro de HORIZONTE_VECINO iteraciones; de cada uno se dan
+    las DOS ESQUINAS OPUESTAS de su rectángulo en los ejes del propio vehículo
+    (posición + tamaño + orientación a la vez), distancia, ángulo y velocidad
+    relativas y su preferencia (grupo/prioridad),
   · el CONTEXTO del escenario (igual para toda la flota): el modo de optimización
     elegido por el usuario (secuencial/global/prioridades, one-hot) y el nº de
     vehículos de la flota, para que la red aprenda a comportarse según ellos.
@@ -49,7 +51,9 @@ HORIZONTE_VECINO = 20
 
 DIM_EGO = 10       # x, y, sinθ, cosθ, v, largo, ancho, v_max, a_max, giro_max
 DIM_META = 6       # meta en ejes propios (dx, dy), dist, sin/cos Δθ_llegada, libre
-DIM_VECINO = 10    # dx, dy, dist, sinΔθ, cosΔθ, v, largo, ancho, pref, presente
+# Vecino: 2 esquinas OPUESTAS de su rectángulo en ejes propios (4), distancia,
+# sinΔθ, cosΔθ, velocidad, preferencia y bandera de presencia.
+DIM_VECINO = 10
 
 # CONTEXTO DE ESCENARIO: preferencias del usuario que influyen en la forma de las
 # rutas y que son iguales para todos los vehículos e instantes del mismo run.
@@ -140,10 +144,20 @@ def vector_entrada(ego, otros):
         # Menor (grupo, prioridad) → planifica antes → tiene preferencia.
         pref = 1.0 if clave_o < clave_ego else (-1.0 if clave_o > clave_ego
                                                 else 0.0)
+        # Dos ESQUINAS OPUESTAS del rectángulo del vecino, en los EJES DEL PROPIO
+        # vehículo: entre ambas codifican a la vez su posición, su tamaño y su
+        # orientación (el mismo estado que guarda el CSV), sin necesidad de pasar
+        # largo y ancho por separado.
+        co, so = math.cos(o["th"]), math.sin(o["th"])
+        hx = 0.5 * o["largo"] * co - 0.5 * o["ancho"] * so
+        hy = 0.5 * o["largo"] * so + 0.5 * o["ancho"] * co
+        p1x, p1y = dx + hx, dy + hy
+        p2x, p2y = dx - hx, dy - hy
         k = base + DIM_VECINO * j
-        out[k:k + DIM_VECINO] = (dx * c + dy * s, -dx * s + dy * c, dist,
-                                 math.sin(dth), math.cos(dth), o["v"],
-                                 o["largo"], o["ancho"], pref, 1.0)
+        out[k:k + DIM_VECINO] = (p1x * c + p1y * s, -p1x * s + p1y * c,
+                                 p2x * c + p2y * s, -p2x * s + p2y * c,
+                                 dist, math.sin(dth), math.cos(dth), o["v"],
+                                 pref, 1.0)
 
     # Contexto de ESCENARIO (constante en todo el run): modo de optimización de
     # flota elegido por el usuario (one-hot) y nº de vehículos de la flota. El nº
@@ -179,15 +193,41 @@ def vehiculo_a_ego(veh, x, y, th, v, pasado, opt="secuencial", n_veh=None):
 # --------------------------------------------------------------------------- #
 # Red (torch solo se importa aquí dentro)
 # --------------------------------------------------------------------------- #
-def crear_red(dim_entrada=DIM_ENTRADA, oculto=512, n_pred=N_PRED):
-    """MLP sencillo: DIM_ENTRADA → oculto×3 → 2·N_PRED (a y giro normalizados)."""
+def configurar_representacion(n_vecinos=N_VECINOS, horizonte=HORIZONTE_VECINO,
+                              h_pasado=H_PASADO):
+    """Fija los hiperparámetros de REPRESENTACIÓN (globales del módulo) y recalcula
+    DIM_ENTRADA. Como las features se reconstruyen desde el CSV en cada
+    entrenamiento, basta llamar aquí antes de construir las muestras para barrer
+    estos valores SIN regenerar datos. Devuelve la nueva DIM_ENTRADA."""
+    global N_VECINOS, HORIZONTE_VECINO, H_PASADO, DIM_ENTRADA
+    N_VECINOS = int(n_vecinos)
+    HORIZONTE_VECINO = int(horizonte)
+    H_PASADO = int(h_pasado)
+    DIM_ENTRADA = (DIM_EGO + DIM_META + 2 * H_PASADO
+                   + DIM_VECINO * N_VECINOS + DIM_CTX)
+    return DIM_ENTRADA
+
+
+def crear_red(dim_entrada=DIM_ENTRADA, oculto=512, n_pred=N_PRED,
+              n_capas=3, dropout=0.0, activacion="relu", normalizacion="no"):
+    """MLP: dim_entrada → (oculto)×n_capas → 2·n_pred (a y giro normalizados).
+    'n_capas' es el nº de capas OCULTAS, 'dropout' la prob. de apagado tras cada
+    activación, 'activacion' la no linealidad (relu/gelu/silu) y 'normalizacion'
+    añade LayerNorm tras cada capa lineal ("no" o "layernorm")."""
     import torch.nn as nn
-    return nn.Sequential(
-        nn.Linear(dim_entrada, oculto), nn.ReLU(),
-        nn.Linear(oculto, oculto), nn.ReLU(),
-        nn.Linear(oculto, oculto), nn.ReLU(),
-        nn.Linear(oculto, 2 * n_pred),
-    )
+    actos = {"relu": nn.ReLU, "gelu": nn.GELU, "silu": nn.SiLU}
+    Act = actos.get(activacion, nn.ReLU)
+    capas, prev = [], dim_entrada
+    for _ in range(max(1, n_capas)):
+        capas.append(nn.Linear(prev, oculto))
+        if normalizacion == "layernorm":
+            capas.append(nn.LayerNorm(oculto))
+        capas.append(Act())
+        if dropout > 0:
+            capas.append(nn.Dropout(dropout))
+        prev = oculto
+    capas.append(nn.Linear(prev, 2 * n_pred))
+    return nn.Sequential(*capas)
 
 
 class Politica:
@@ -205,11 +245,19 @@ class Politica:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         punto = torch.load(ruta, map_location=device, weights_only=False)
         cfg = punto["config"]
+        # Reconfigura la REPRESENTACIÓN a la del modelo guardado (por si se entrenó
+        # con otro nº de vecinos/horizonte/historia) ANTES de comprobar la dim.
+        configurar_representacion(cfg.get("n_vecinos", N_VECINOS),
+                                  cfg.get("horizonte", HORIZONTE_VECINO),
+                                  cfg.get("h_pasado", H_PASADO))
         if cfg["dim_entrada"] != DIM_ENTRADA or cfg["n_pred"] != N_PRED:
             raise ValueError(
                 f"El modelo de {ruta} se entrenó con otra definición de entrada "
                 f"({cfg}); reentrena con la versión actual de politica.py.")
-        red = crear_red(cfg["dim_entrada"], cfg["oculto"], cfg["n_pred"])
+        red = crear_red(cfg["dim_entrada"], cfg["oculto"], cfg["n_pred"],
+                        cfg.get("n_capas", 3), cfg.get("dropout", 0.0),
+                        cfg.get("activacion", "relu"),
+                        cfg.get("normalizacion", "no"))
         red.load_state_dict(punto["state_dict"])
         red.to(device).eval()
         media = torch.tensor(punto["media"], dtype=torch.float32, device=device)
@@ -230,6 +278,81 @@ class Politica:
 # --------------------------------------------------------------------------- #
 # Despliegue en bucle cerrado sobre una flota (mismo modelo de bicicleta)
 # --------------------------------------------------------------------------- #
+def rollout_multiflota(flotas, politica, t_max=180.0, opts=None):
+    """Simula VARIAS flotas independientes a la vez, agrupando en UNA sola consulta
+    a la red todos los vehículos activos de todas ellas. Cada vehículo recibe
+    exactamente las mismas entradas que en rollout_flota —los vecinos siguen siendo
+    solo los de su propia flota—; lo único que cambia es que las consultas se
+    agrupan, lo que evita miles de llamadas diminutas a la GPU. Escribe veh.traj y
+    veh.mision_ok; devuelve el nº de llegados por flota."""
+    if opts is None:
+        opts = ["secuencial"] * len(flotas)
+    est, planes = [], []
+    for vehiculos in flotas:
+        e = []
+        for veh in vehiculos:
+            x, y, th = veh.inicio
+            e.append({"x": x, "y": y, "th": th, "v": veh.v_inicial,
+                      "pasado": [], "traj": [(x, y, th)], "llegado": False})
+        est.append(e)
+        planes.append([None] * len(vehiculos))
+
+    pasos = int(round(t_max / DT))
+    for paso in range(pasos):
+        activos = [(f, i) for f, vehs in enumerate(flotas)
+                   for i in range(len(vehs)) if not est[f][i]["llegado"]]
+        if not activos:
+            break
+        if paso % N_PRED == 0:
+            obs = []
+            for f, i in activos:
+                vehs, ef = flotas[f], est[f]
+                otros = [{"x": ef[j]["x"], "y": ef[j]["y"], "th": ef[j]["th"],
+                          "v": ef[j]["v"], "largo": vehs[j].length,
+                          "ancho": vehs[j].width, "v_max": vehs[j].v_max,
+                          "grupo": vehs[j].grupo,
+                          "prioridad": vehs[j].prioridad}
+                         for j in range(len(vehs)) if j != i]
+                obs.append(vector_entrada(
+                    vehiculo_a_ego(vehs[i], ef[i]["x"], ef[i]["y"], ef[i]["th"],
+                                   ef[i]["v"], ef[i]["pasado"], opt=opts[f],
+                                   n_veh=len(vehs)), otros))
+            pred = politica.predecir_lote(obs)
+            for k, (f, i) in enumerate(activos):
+                planes[f][i] = pred[k]
+
+        for f, i in activos:
+            veh, e = flotas[f][i], est[f][i]
+            a_n, g_n = planes[f][i][paso % N_PRED]
+            a = float(np.clip(a_n, -1.0, 1.0)) * veh.a_max
+            giro = float(np.clip(g_n, -1.0, 1.0)) * veh.delta_max
+            x, y, th, v = e["x"], e["y"], e["th"], e["v"]
+            e["x"] = x + v * DT * math.cos(th)
+            e["y"] = y + v * DT * math.sin(th)
+            e["th"] = ang_norm(th + v * DT * math.tan(giro) / veh.wheelbase)
+            e["v"] = max(-veh.v_max, min(veh.v_max, v + a * DT))
+            e["pasado"].append((a, giro))
+            if len(e["pasado"]) > H_PASADO:
+                e["pasado"].pop(0)
+            mx, my = veh.meta
+            if (math.hypot(e["x"] - mx, e["y"] - my) < DIST_LLEGADA
+                    and abs(e["v"]) < V_LLEGADA):
+                e["llegado"] = True
+                e["v"] = 0.0
+            e["traj"].append((e["x"], e["y"], e["th"]))
+
+    llegados = []
+    for vehs, ef in zip(flotas, est):
+        n_ok = 0
+        for veh, e in zip(vehs, ef):
+            veh.traj = e["traj"]
+            veh.dt_plan = DT
+            veh.mision_ok = e["llegado"]
+            n_ok += int(e["llegado"])
+        llegados.append(n_ok)
+    return llegados
+
+
 def rollout_flota(vehiculos, politica, t_max=180.0, opt="secuencial"):
     """Simula la flota entera con la red: cada N_PRED pasos consulta la red (una
     pasada por vehículo activo, en lote) y aplica los controles predichos con el

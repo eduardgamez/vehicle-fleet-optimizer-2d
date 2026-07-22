@@ -162,8 +162,12 @@ VEH_VMAX = 2.5      # velocidad máxima por defecto (m/s)
 VEH_AMAX = 1.0      # aceleración máxima por defecto (m/s²)
 VEH_GIRO = 35.0     # ángulo de dirección máximo por defecto (grados)
 
-# Carpeta persistente donde se guardan los mapas importados desde imagen.
-MAPAS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mapas")
+# Carpeta persistente de mapas: la de la RAÍZ del proyecto (junto a
+# multi_v_evo.py), NO una local en Apr Superv/. Es donde vive el mapa fijo de
+# entrenamiento (mapas/mapa_entrenamiento.json) que usan el generador y la GUI,
+# así que save/load de mapas comparten esa misma carpeta.
+MAPAS_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "mapas")
 
 # Carpeta donde se acumula el DATASET de aprendizaje supervisado: por cada ruta
 # definitiva y cada vehículo se registra, una fila por instante (DT), el estado

@@ -20,8 +20,11 @@ Ejecutar:   python entrenar.py                  (usa rutas/ y 30 épocas)
 import argparse
 import ast
 import glob
+import itertools
 import math
+import multiprocessing
 import os
+from concurrent.futures import ProcessPoolExecutor
 import sys
 import time
 import zlib
@@ -36,8 +39,12 @@ except (AttributeError, ValueError):
 import numpy as np
 
 from nucleo import DT, RUTAS_DIR
-from politica import (DIM_ENTRADA, H_PASADO, N_PRED, MODELO_PT,
-                      vector_entrada, crear_red)
+# 'pol' se usa para leer DIM_ENTRADA / H_PASADO / N_PRED de forma DINÁMICA: el
+# barrido reconfigura la representación (nº de vecinos, historia…) en caliente y
+# esos globales cambian, así que hay que consultarlos por el módulo, no fijarlos
+# en el import.
+import politica as pol
+from politica import MODELO_PT, vector_entrada, crear_red
 
 
 # --------------------------------------------------------------------------- #
@@ -126,7 +133,7 @@ def construir_muestras(runs):
             n = len(arr)
             for t in range(n):
                 pasado = [(arr[k, 4], arr[k, 5])
-                          for k in range(max(0, t - H_PASADO), t)]
+                          for k in range(max(0, t - pol.H_PASADO), t)]
                 ego = {"x": arr[t, 0], "y": arr[t, 1], "th": arr[t, 2],
                        "v": arr[t, 3], "largo": p["largo"], "ancho": p["ancho"],
                        "v_max": p["v_max"], "a_max": p["a_max"],
@@ -149,8 +156,8 @@ def construir_muestras(runs):
                                   "grupo": op["grupo"],
                                   "prioridad": op["prioridad"]})
                 X.append(vector_entrada(ego, otros))
-                obj = np.zeros(2 * N_PRED, dtype=np.float32)
-                for k in range(N_PRED):
+                obj = np.zeros(2 * pol.N_PRED, dtype=np.float32)
+                for k in range(pol.N_PRED):
                     if t + k < n:       # más allá del final: aparcado (0, 0)
                         obj[2 * k] = arr[t + k, 4] / max(p["a_max"], 1e-6)
                         obj[2 * k + 1] = (arr[t + k, 5]
@@ -166,62 +173,131 @@ def es_validacion(clave_run):
 
 
 # --------------------------------------------------------------------------- #
-# Entrenamiento
+# Puntuación por ROLLOUT en bucle cerrado (la métrica que decide "la mejor red")
 # --------------------------------------------------------------------------- #
-def main():
-    ap = argparse.ArgumentParser(description="Entrena la política neuronal.")
-    ap.add_argument("--rutas", default=RUTAS_DIR,
-                    help="carpeta raíz con los CSV (def. rutas/)")
-    ap.add_argument("--epocas", type=int, default=30)
-    ap.add_argument("--lote", type=int, default=4096)
-    ap.add_argument("--lr", type=float, default=1e-3)
-    ap.add_argument("--oculto", type=int, default=512,
-                    help="anchura de las capas ocultas (def. 512)")
-    ap.add_argument("--salida", default=MODELO_PT)
-    args = ap.parse_args()
+# Escalas de la recompensa parcial: a qué distancia (m) y a qué error de ángulo
+# (rad) la puntuación cae a 1/e. Fijan cómo de "generosa" es la nota al que no
+# llega pero se queda cerca.
+ESCALA_DIST = 2.0
+ESCALA_ANG = math.radians(30.0)
 
+
+def _puntuar_vehiculo(veh):
+    """Nota POSITIVA de un vehículo tras el rollout:
+      · llega a destino (mision_ok)      → 1 + ang        (rango 1..2, ALTA),
+      · no llega                         → 0.5·prox·(0.5+0.5·ang)   (BAJA, variable)
+    donde 'prox' = e^(−d/ESCALA_DIST) premia acabar cerca de la meta y 'ang' =
+    e^(−|Δθ|/ESCALA_ANG) premia acabar con el ángulo de llegada exigido (1.0 si el
+    ángulo es libre). Así "llegar en buen ángulo" domina y el resto puntúa poco
+    pero de forma continua según cuánto se acerca en posición y en ángulo."""
+    from nucleo import ang_norm
+    if not veh.traj:
+        return 0.0
+    fx, fy, fth = veh.traj[-1]
+    mx, my = veh.meta
+    d = math.hypot(fx - mx, fy - my)
+    # Una red divergida (NaN en los pesos) produce poses no finitas: no puntúa.
+    if not (math.isfinite(d) and math.isfinite(fth)):
+        return 0.0
+    prox = math.exp(-d / ESCALA_DIST)
+    if veh.meta_th is None:
+        ang = 1.0
+    else:
+        ang = math.exp(-abs(ang_norm(fth - veh.meta_th)) / ESCALA_ANG)
+    if veh.mision_ok:
+        return 1.0 + ang
+    return 0.5 * prox * (0.5 + 0.5 * ang)
+
+
+def _opt_de_run(arch, rid):
+    """Modo de optimización guardado en la línea '# run=<rid> opt=<modo> …'."""
+    with open(arch, encoding="utf-8") as f:
+        for linea in f:
+            if linea.startswith("# run="):
+                if linea.split("run=", 1)[1].split()[0] == rid:
+                    return ("secuencial" if "opt=" not in linea
+                            else linea.split("opt=", 1)[1].split()[0])
+    return "secuencial"
+
+
+def escenarios_eval(carpeta):
+    """Lista de (archivo, run_id, modo_opt) para reproducir cada escenario."""
+    from nucleo import listar_runs
+    return [(arch, rid, _opt_de_run(arch, rid))
+            for arch, rid, _ in listar_runs(carpeta)]
+
+
+_PLANTILLAS = {}        # (archivo, run) -> vehículos base, para no reparsear el CSV
+
+
+def _flota_de(arch, rid):
+    """Vehículos frescos de un escenario (el rollout muta traj, así que cada
+    evaluación necesita copias propias)."""
+    import copy
+    from nucleo import cargar_run
+    clave = (arch, rid)
+    if clave not in _PLANTILLAS:
+        vehs = cargar_run(arch, rid)
+        for v in vehs:
+            v.traj = []                      # la del CSV no hace falta y pesa
+        _PLANTILLAS[clave] = vehs
+    return copy.deepcopy(_PLANTILLAS[clave])
+
+
+def evaluar_rollout(politica, escenarios):
+    """Media de la nota por vehículo sobre todos los escenarios, ejecutando la
+    política en bucle cerrado desde el estado inicial. Los escenarios se simulan
+    A LA VEZ para agrupar las consultas a la red. Devuelve (nota, n_veh)."""
+    from politica import rollout_multiflota
+    flotas = [_flota_de(arch, rid) for arch, rid, _ in escenarios]
+    opts = [opt for _, _, opt in escenarios]
+    rollout_multiflota(flotas, politica, opts=opts)
+    total, n = 0.0, 0
+    for vehs in flotas:
+        for veh in vehs:
+            total += _puntuar_vehiculo(veh)
+            n += 1
+    return (total / n if n else 0.0), n
+
+
+# --------------------------------------------------------------------------- #
+# Entrenamiento de UNA red (reutilizado por el modo simple y por el barrido)
+# --------------------------------------------------------------------------- #
+def _a_tensores(Xtr, Ytr, Xva, Yva, media, escala, device):
     import torch
+    return (torch.from_numpy((Xtr - media) / escala).to(device),
+            torch.from_numpy(Ytr).to(device),
+            torch.from_numpy((Xva - media) / escala).to(device),
+            torch.from_numpy(Yva).to(device))
 
-    print(f"[datos] leyendo CSVs de {args.rutas} …")
-    runs = leer_runs(args.rutas)
-    if not runs:
-        raise SystemExit("No hay runs en la carpeta de rutas: genera datos "
-                         "primero con generador.py (o con la GUI).")
-    r_tr = [r for r in runs if not es_validacion(r[0])]
-    r_va = [r for r in runs if es_validacion(r[0])]
-    if not r_va:                        # pocos runs: aparta el último
-        r_va = [r_tr.pop()]
-    print(f"[datos] {len(runs)} runs ({len(r_tr)} train / {len(r_va)} val); "
-          "construyendo muestras…")
-    Xtr, Ytr = construir_muestras(r_tr)
-    Xva, Yva = construir_muestras(r_va)
-    print(f"[datos] {len(Xtr):,} muestras de train, {len(Xva):,} de val "
-          f"(dim entrada {DIM_ENTRADA})")
 
-    media = Xtr.mean(axis=0)
-    escala = np.maximum(Xtr.std(axis=0), 1e-6)
+FACTOR_LR_SGD = 10.0    # SGD necesita un paso mayor que Adam para el mismo rango
+#                         de lr, si no la comparación entre ambos es falsa
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"[train] dispositivo: {device}")
-    Xtr_t = torch.from_numpy((Xtr - media) / escala).to(device)
-    Ytr_t = torch.from_numpy(Ytr).to(device)
-    Xva_t = torch.from_numpy((Xva - media) / escala).to(device)
-    Yva_t = torch.from_numpy(Yva).to(device)
 
-    red = crear_red(DIM_ENTRADA, args.oculto, N_PRED).to(device)
-    opt = torch.optim.AdamW(red.parameters(), lr=args.lr)
-    plani = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epocas)
+def entrenar_red(red, tensores, device, epocas, lr, lote, weight_decay=0.01,
+                 optimizador="adamw", verbose=False):
+    """Entrena 'red' y devuelve (mejor_state_dict, mejor_val). Guarda en memoria
+    el estado de la época con menor val (no toca disco)."""
+    import copy
+    import torch
+    Xtr_t, Ytr_t, Xva_t, Yva_t = tensores
+    if optimizador == "sgd":
+        opt = torch.optim.SGD(red.parameters(), lr=lr * FACTOR_LR_SGD,
+                              momentum=0.9, weight_decay=weight_decay)
+    else:
+        opt = torch.optim.AdamW(red.parameters(), lr=lr,
+                                weight_decay=weight_decay)
+    plani = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epocas)
     perdida = torch.nn.MSELoss()
-
-    mejor_val = float("inf")
-    os.makedirs(os.path.dirname(args.salida), exist_ok=True)
-    for ep in range(1, args.epocas + 1):
+    mejor_val, mejor_estado = float("inf"), None
+    for ep in range(1, epocas + 1):
         t0 = time.perf_counter()
         red.train()
         orden = torch.randperm(len(Xtr_t), device=device)
         tot = 0.0
-        for i in range(0, len(orden), args.lote):
-            idx = orden[i:i + args.lote]
+        for i in range(0, len(orden), lote):
+            idx = orden[i:i + lote]
             opt.zero_grad()
             l = perdida(red(Xtr_t[idx]), Ytr_t[idx])
             l.backward()
@@ -230,26 +306,413 @@ def main():
         plani.step()
         red.eval()
         with torch.no_grad():
-            lv = sum(perdida(red(Xva_t[i:i + args.lote]),
-                             Yva_t[i:i + args.lote]).item()
-                     * len(Xva_t[i:i + args.lote])
-                     for i in range(0, len(Xva_t), args.lote)) / len(Xva_t)
-        marca = ""
-        if lv < mejor_val:
+            lv = sum(perdida(red(Xva_t[i:i + lote]),
+                             Yva_t[i:i + lote]).item() * len(Xva_t[i:i + lote])
+                     for i in range(0, len(Xva_t), lote)) / len(Xva_t)
+        # Solo cuenta una época con pérdida FINITA: con tasas altas (sobre todo
+        # con SGD) el entrenamiento puede divergir a NaN, y NaN < x siempre es
+        # falso, así que sin esta guarda no se guardaría ningún estado.
+        if math.isfinite(lv) and lv < mejor_val:
             mejor_val = lv
-            torch.save({
-                "config": {"dim_entrada": DIM_ENTRADA, "oculto": args.oculto,
-                           "n_pred": N_PRED, "h_pasado": H_PASADO},
-                "media": media.tolist(), "escala": escala.tolist(),
-                "state_dict": red.state_dict(),
-            }, args.salida)
-            marca = "  <- guardado"
-        print(f"[train] época {ep:3d}/{args.epocas} · "
-              f"train {tot / len(Xtr_t):.5f} · val {lv:.5f} · "
-              f"{time.perf_counter() - t0:.1f} s{marca}")
+            mejor_estado = copy.deepcopy(red.state_dict())
+        if verbose:
+            marca = "  <- mejor" if lv <= mejor_val else ""
+            print(f"[train] época {ep:3d}/{epocas} · train {tot / len(Xtr_t):.5f}"
+                  f" · val {lv:.5f} · {time.perf_counter() - t0:.1f} s{marca}")
+    if mejor_estado is None:        # divergió en TODAS las épocas
+        mejor_estado = copy.deepcopy(red.state_dict())
+    return mejor_estado, mejor_val
 
-    print(f"[train] mejor val {mejor_val:.5f} · modelo en {args.salida}")
+
+def _cfg(arq, nota=None, val=None):
+    """Diccionario 'config' que se guarda en el .pt (arquitectura + representación),
+    suficiente para reconstruir y desplegar la red con Politica.cargar."""
+    return {"dim_entrada": pol.DIM_ENTRADA, "oculto": arq["oculto"],
+            "n_pred": pol.N_PRED, "h_pasado": pol.H_PASADO,
+            "n_capas": arq["n_capas"], "dropout": arq["dropout"],
+            "activacion": arq["activacion"], "n_vecinos": pol.N_VECINOS,
+            "horizonte": pol.HORIZONTE_VECINO,
+            "normalizacion": arq.get("normalizacion", "no"),
+            "nota_rollout": nota, "val_mse": val}
+
+
+def _guardar(ruta, cfg, media, escala, state):
+    import torch
+    os.makedirs(os.path.dirname(ruta), exist_ok=True)
+    torch.save({"config": cfg, "media": media.tolist(),
+                "escala": escala.tolist(), "state_dict": state}, ruta)
+
+
+def _preparar_datos(runs):
+    """Divide en train/val por run y construye muestras con la representación
+    ACTUAL (pol.*). Devuelve (Xtr, Ytr, Xva, Yva)."""
+    r_tr = [r for r in runs if not es_validacion(r[0])]
+    r_va = [r for r in runs if es_validacion(r[0])]
+    if not r_va:                        # pocos runs: aparta el último
+        r_va = [r_tr.pop()]
+    Xtr, Ytr = construir_muestras(r_tr)
+    Xva, Yva = construir_muestras(r_va)
+    return Xtr, Ytr, Xva, Yva
+
+
+# --------------------------------------------------------------------------- #
+# Modo SIMPLE: entrena una sola red con los hiperparámetros dados
+# --------------------------------------------------------------------------- #
+def main(args):
+    import torch
+
+    print(f"[datos] leyendo CSVs de {args.rutas} …")
+    runs = leer_runs(args.rutas)
+    if not runs:
+        raise SystemExit("No hay runs en la carpeta de rutas: genera datos "
+                         "primero con generador.py (o con la GUI).")
+    pol.configurar_representacion(args.n_vecinos, args.horizonte, args.h_pasado)
+    Xtr, Ytr, Xva, Yva = _preparar_datos(runs)
+    print(f"[datos] {len(runs)} runs · {len(Xtr):,} muestras train / "
+          f"{len(Xva):,} val (dim entrada {pol.DIM_ENTRADA})")
+
+    media = Xtr.mean(axis=0)
+    escala = np.maximum(Xtr.std(axis=0), 1e-6)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"[train] dispositivo: {device}")
+    tensores = _a_tensores(Xtr, Ytr, Xva, Yva, media, escala, device)
+
+    arq = {"oculto": args.oculto, "n_capas": args.n_capas,
+           "dropout": args.dropout, "activacion": args.activacion}
+    red = crear_red(pol.DIM_ENTRADA, arq["oculto"], pol.N_PRED,
+                    arq["n_capas"], arq["dropout"], arq["activacion"]).to(device)
+    estado, mejor_val = entrenar_red(red, tensores, device, args.epocas,
+                                     args.lr, args.lote, verbose=True)
+    _guardar(args.salida, _cfg(arq), media, escala, estado)
+
+    # Nota de rollout del modelo guardado (métrica de verdad).
+    from politica import Politica
+    red.load_state_dict(estado)
+    politica = Politica(red.eval(),
+                        torch.tensor(media, dtype=torch.float32, device=device),
+                        torch.tensor(escala, dtype=torch.float32, device=device),
+                        device)
+    nota, nveh = evaluar_rollout(politica, escenarios_eval(args.rutas))
+    print(f"[train] mejor val {mejor_val:.5f} · nota rollout {nota:.4f} "
+          f"({nveh} veh.) · modelo en {args.salida}")
+
+
+# --------------------------------------------------------------------------- #
+# Modo BARRIDO: prueba muchas configs y se queda con la de mejor nota de rollout
+# --------------------------------------------------------------------------- #
+# Espacio de búsqueda de la exploración amplia. Dos topes vienen del propio
+# problema, no de la red: los escenarios tienen 2-6 vehículos, así que un vehículo
+# nunca ve más de 5 vecinos (valores mayores serían bloques siempre a cero); y el
+# horizonte del filtro debe ser >= N_PRED (10), los pasos que la red compromete en
+# bucle abierto. Total: 77 760 combinaciones.
+ESPACIO = {
+    "n_capas":      [2, 3, 4],
+    "oculto":       [256, 512, 1024],
+    "dropout":      [0.0, 0.1],
+    "activacion":   ["relu", "gelu", "silu"],
+    "lr":           [1e-3, 3e-3, 8e-3],
+    "lote":         [512, 2048],
+    "n_vecinos":    [2, 3, 5],
+    "h_pasado":     [3, 5, 10],
+    "horizonte":    [10, 15, 20],
+    "epocas":       [40, 80],
+    "weight_decay": [0.0, 0.01],
+    "normalizacion": ["no", "layernorm"],
+    "optimizador":  ["adamw", "sgd"],
+}
+
+
+CAMPOS_EXTRA = ["dim_entrada", "n_muestras", "val_mse", "nota_rollout",
+                "segundos"]
+
+
+def _clave_config(c, claves):
+    """Identificador textual de una config, con el mismo formato que se escribe
+    en el CSV, para poder reconocer las ya evaluadas al reanudar."""
+    return tuple(str(c[k]) for k in claves)
+
+
+def _ya_evaluadas(log_path, claves):
+    """Configs presentes en un registro previo (reanudación tras un corte)."""
+    import csv
+    if not os.path.exists(log_path):
+        return set()
+    hechas = set()
+    with open(log_path, encoding="utf-8", newline="") as f:
+        for fila in csv.DictReader(f):
+            if all(k in fila for k in claves):
+                hechas.add(tuple(fila[k] for k in claves))
+    return hechas
+
+
+def _evaluar_config(c, runs, escenarios, device, epocas, cache):
+    """Entrena y evalúa UNA config. Devuelve (nota, val, media, escala, estado,
+    dim_entrada, n_muestras). 'cache' guarda las muestras por representación."""
+    import torch
+    from politica import Politica
+    clave = (c["n_vecinos"], c["horizonte"], c["h_pasado"])
+    # Fijar siempre los globales: el rollout posterior los consulta.
+    pol.configurar_representacion(*clave)
+    if clave not in cache:
+        Xtr, Ytr, Xva, Yva = _preparar_datos(runs)
+        media = Xtr.mean(axis=0)
+        escala = np.maximum(Xtr.std(axis=0), 1e-6)
+        cache[clave] = (_a_tensores(Xtr, Ytr, Xva, Yva, media, escala, device),
+                        media, escala, len(Xtr))
+    tensores, media, escala, n_muestras = cache[clave]
+
+    red = crear_red(pol.DIM_ENTRADA, c["oculto"], pol.N_PRED,
+                    c["n_capas"], c["dropout"], c["activacion"],
+                    c.get("normalizacion", "no")).to(device)
+    estado, val = entrenar_red(
+        red, tensores, device, int(c.get("epocas", epocas)), c["lr"], c["lote"],
+        weight_decay=c.get("weight_decay", 0.01),
+        optimizador=c.get("optimizador", "adamw"))
+    red.load_state_dict(estado)
+    politica = Politica(
+        red.eval(), torch.tensor(media, dtype=torch.float32, device=device),
+        torch.tensor(escala, dtype=torch.float32, device=device), device)
+    nota, _ = evaluar_rollout(politica, escenarios)
+    return nota, val, media, escala, estado, pol.DIM_ENTRADA, n_muestras
+
+
+def _trabajar_configs(tarea):
+    """Worker de barrido: evalúa su lote de configs, escribe su propio CSV y
+    devuelve solo la MEJOR que ha encontrado (devolver todas sería tirar
+    gigabytes de pesos entre procesos)."""
+    import csv
+    import torch
+    wid, configs, claves, rutas, epocas, log_w = tarea
+    runs = leer_runs(rutas)
+    escenarios = escenarios_eval(rutas)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    cache, mejor = {}, None
+    with open(log_w, "w", newline="", encoding="utf-8") as fcsv:
+        w = csv.DictWriter(fcsv, fieldnames=claves + CAMPOS_EXTRA)
+        w.writeheader()
+        for k, c in enumerate(configs, 1):
+            t0 = time.perf_counter()
+            nota, val, media, escala, estado, dim, n_m = _evaluar_config(
+                c, runs, escenarios, device, epocas, cache)
+            fila = dict(c)
+            fila.update({"dim_entrada": dim, "n_muestras": n_m,
+                         "val_mse": round(val, 5), "nota_rollout": round(nota, 4),
+                         "segundos": round(time.perf_counter() - t0, 1)})
+            w.writerow(fila)
+            fcsv.flush()
+            if mejor is None or nota > mejor[0]:
+                # Los pesos viajan en CPU: el proceso padre los reubica.
+                estado_cpu = {n: t.detach().cpu() for n, t in estado.items()}
+                mejor = (nota, val, dict(c), media, escala, estado_cpu, dim)
+            print(f"[w{wid}] {k}/{len(configs)} · nota {nota:.4f} · "
+                  f"mejor {mejor[0]:.4f}", flush=True)
+    return wid, mejor, len(configs)
+
+
+def barrido(args):
+    import csv
+    import random as _rnd
+    import torch
+
+    print(f"[datos] leyendo CSVs de {args.rutas} …")
+    runs = leer_runs(args.rutas)
+    if not runs:
+        raise SystemExit("No hay runs: genera datos primero con generador.py.")
+    escenarios = escenarios_eval(args.rutas)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Espacio de búsqueda: el JSON de --espacio (fase de grid fino) o el ESPACIO
+    # por defecto. Debe contener las mismas claves que ESPACIO.
+    if args.espacio:
+        import json
+        with open(args.espacio, encoding="utf-8") as fj:
+            espacio = json.load(fj)
+    else:
+        espacio = ESPACIO
+    claves = list(ESPACIO.keys())              # orden fijo de columnas
+
+    _rnd.seed(args.semilla)
+    todas = list(itertools.product(*(espacio[k] for k in claves)))
+    _rnd.shuffle(todas)
+    # Exhaustivo: TODAS las combinaciones (grid fino ya acotado). Si no, muestreo
+    # aleatorio sin repetición de n_configs (búsqueda amplia).
+    if not args.exhaustivo:
+        # --fraccion pide un PORCENTAJE del espacio total (p. ej. 0.2 = 20 %);
+        # si no se da, se usa el número fijo de --n-configs.
+        n = (int(round(args.fraccion * len(todas))) if args.fraccion
+             else args.n_configs)
+        todas = todas[:max(1, n)]
+    configs = [dict(zip(claves, vals)) for vals in todas]
+
+    log_path = args.log or os.path.join(os.path.dirname(args.salida),
+                                        "barrido.csv")
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    campos = claves + CAMPOS_EXTRA
+
+    # REANUDACIÓN: si ya hay registro previo, no se repite lo evaluado.
+    hechas = _ya_evaluadas(log_path, claves)
+    if hechas:
+        antes = len(configs)
+        configs = [c for c in configs
+                   if _clave_config(c, claves) not in hechas]
+        print(f"[barrido] reanudando: {antes - len(configs)} configs ya "
+              f"evaluadas en {os.path.basename(log_path)}, faltan {len(configs)}")
+
+    procesos = max(1, min(args.procesos, len(configs) or 1))
+    print(f"[barrido] {len(runs)} runs · {len(escenarios)} escenarios de rollout "
+          f"· {device} · {len(configs)} configs · {procesos} procesos"
+          f"{' (exhaustivo)' if args.exhaustivo else ''}")
+    if not configs:
+        raise SystemExit("[barrido] no queda ninguna config por evaluar.")
+
+    t_ini = time.perf_counter()
+    mejor = None
+
+    if procesos == 1:
+        cache = {}
+        nuevo = not hechas
+        with open(log_path, "a" if hechas else "w", newline="",
+                  encoding="utf-8") as fcsv:
+            w = csv.DictWriter(fcsv, fieldnames=campos)
+            if nuevo:
+                w.writeheader()
+            for k, c in enumerate(configs, 1):
+                t0 = time.perf_counter()
+                nota, val, media, escala, estado, dim, n_m = _evaluar_config(
+                    c, runs, escenarios, device, args.epocas, cache)
+                fila = dict(c)
+                fila.update({"dim_entrada": dim, "n_muestras": n_m,
+                             "val_mse": round(val, 5),
+                             "nota_rollout": round(nota, 4),
+                             "segundos": round(time.perf_counter() - t0, 1)})
+                w.writerow(fila)
+                fcsv.flush()
+                if mejor is None or nota > mejor[0]:
+                    mejor = (nota, val, dict(c), media, escala, estado, dim)
+                transc = time.perf_counter() - t_ini
+                print(f"[barrido] {k}/{len(configs)} · nota {nota:.4f} · "
+                      f"val {val:.4f} · faltan "
+                      f"~{transc / k * (len(configs) - k) / 60:.0f} min · "
+                      f"mejor {mejor[0]:.4f}", flush=True)
+    else:
+        # Reparto por BLOQUES CONTIGUOS tras ordenar por representación: así cada
+        # worker toca pocas ternas distintas y su caché de muestras acierta casi
+        # siempre (reconstruirlas es lo más caro).
+        configs.sort(key=lambda c: (c["n_vecinos"], c["horizonte"],
+                                    c["h_pasado"]))
+        trozos = [configs[i::procesos] for i in range(procesos)]
+        tareas = [(i, t, claves, args.rutas, args.epocas,
+                   f"{log_path}.w{i}")
+                  for i, t in enumerate(trozos) if t]
+        ctx = multiprocessing.get_context("spawn")
+        with ProcessPoolExecutor(max_workers=len(tareas), mp_context=ctx) as ex:
+            for wid, m, n in ex.map(_trabajar_configs, tareas):
+                print(f"[barrido] worker {wid} terminado: {n} configs · "
+                      f"mejor {m[0]:.4f}" if m else f"worker {wid}: sin datos")
+                if m and (mejor is None or m[0] > mejor[0]):
+                    mejor = m
+        # Fusiona los CSV parciales en el registro principal y los borra.
+        with open(log_path, "a" if hechas else "w", newline="",
+                  encoding="utf-8") as fcsv:
+            w = csv.DictWriter(fcsv, fieldnames=campos)
+            if not hechas:
+                w.writeheader()
+            for i, _ in enumerate(tareas):
+                parcial = f"{log_path}.w{i}"
+                if not os.path.exists(parcial):
+                    continue
+                with open(parcial, encoding="utf-8", newline="") as fp:
+                    for fila in csv.DictReader(fp):
+                        w.writerow(fila)
+                os.remove(parcial)
+
+    print(f"[barrido] {len(configs)} configs en "
+          f"{(time.perf_counter() - t_ini) / 60:.1f} min")
+
+    nota, val, c, media, escala, estado, _ = mejor
+
+    # El mejor GLOBAL puede estar en el registro PREVIO (reanudación tras un
+    # corte), cuyos pesos ya no existen en memoria. Se detecta por IDENTIDAD de
+    # config, NO por el número: la nota del CSV está redondeada y puede quedar un
+    # pelín por encima de la de memoria, lo que antes disparaba un reentrenamiento
+    # espurio que TIRABA los pesos buenos del ganador de esta misma tanda.
+    mejor_log, fila_log = -1.0, None
+    with open(log_path, encoding="utf-8", newline="") as f:
+        for fila in csv.DictReader(f):
+            try:
+                n = float(fila["nota_rollout"])
+            except (KeyError, ValueError):
+                continue
+            if n > mejor_log:
+                mejor_log, fila_log = n, fila
+    c_log = {k: (fila_log[k] if isinstance(ESPACIO[k][0], str)
+                 else type(ESPACIO[k][0])(float(fila_log[k])))
+             for k in claves}
+    if _clave_config(c_log, claves) != _clave_config(c, claves):
+        # El mejor del registro es OTRA config: sus pesos no están en memoria, así
+        # que se reentrena esa (una sola vez) para poder guardarla.
+        print(f"[barrido] el mejor global ({mejor_log:.4f}) es de una tanda "
+              f"anterior sin pesos: reentrenando esa config · {c_log}")
+        nota, val, media, escala, estado, _, _ = _evaluar_config(
+            c_log, runs, escenarios, device, args.epocas, {})
+        c = c_log
+        print(f"[barrido] reentrenada: nota {nota:.4f} (val {val:.5f})")
+
+    # Reconfigura la representación de la mejor config antes de guardar (por si la
+    # última probada era otra) y vuelca el modelo ganador a la salida.
+    pol.configurar_representacion(c["n_vecinos"], c["horizonte"], c["h_pasado"])
+    arq = {"oculto": c["oculto"], "n_capas": c["n_capas"],
+           "dropout": c["dropout"], "activacion": c["activacion"],
+           "normalizacion": c.get("normalizacion", "no")}
+    _guardar(args.salida, _cfg(arq, nota, val), media, escala, estado)
+    print(f"\n[barrido] MEJOR nota {nota:.4f} (val {val:.5f}) · {c}")
+    print(f"[barrido] modelo ganador → {args.salida} · registro → {log_path}")
+
+
+def construir_parser():
+    ap = argparse.ArgumentParser(description="Entrena la política neuronal.")
+    ap.add_argument("--rutas", default=RUTAS_DIR,
+                    help="carpeta raíz con los CSV (def. rutas/)")
+    ap.add_argument("--epocas", type=int, default=40)
+    ap.add_argument("--lote", type=int, default=4096)
+    ap.add_argument("--lr", type=float, default=1e-3)
+    ap.add_argument("--oculto", type=int, default=512,
+                    help="anchura de las capas ocultas (def. 512)")
+    ap.add_argument("--n-capas", dest="n_capas", type=int, default=3,
+                    help="nº de capas ocultas (def. 3)")
+    ap.add_argument("--dropout", type=float, default=0.0)
+    ap.add_argument("--activacion", default="relu",
+                    choices=("relu", "gelu", "silu"))
+    ap.add_argument("--n-vecinos", dest="n_vecinos", type=int,
+                    default=pol.N_VECINOS)
+    ap.add_argument("--horizonte", type=int, default=pol.HORIZONTE_VECINO)
+    ap.add_argument("--h-pasado", dest="h_pasado", type=int, default=pol.H_PASADO)
+    ap.add_argument("--salida", default=MODELO_PT)
+    ap.add_argument("--barrido", action="store_true",
+                    help="prueba muchas configs y guarda la de mejor nota rollout")
+    ap.add_argument("--n-configs", dest="n_configs", type=int, default=24,
+                    help="configs a probar en el barrido (def. 24)")
+    ap.add_argument("--semilla", type=int, default=0,
+                    help="semilla del muestreo de configs del barrido")
+    ap.add_argument("--espacio", default=None,
+                    help="JSON con el espacio de búsqueda (mismas claves que "
+                         "ESPACIO); por defecto usa el ESPACIO interno")
+    ap.add_argument("--exhaustivo", action="store_true",
+                    help="prueba TODAS las combinaciones del espacio (grid fino)")
+    ap.add_argument("--fraccion", type=float, default=None,
+                    help="fracción del espacio total a muestrear (0.2 = 20 %%); "
+                         "tiene prioridad sobre --n-configs")
+    ap.add_argument("--procesos", type=int, default=6,
+                    help="procesos en paralelo del barrido (def. 6). Bájalo si "
+                         "estás usando la GPU para otra cosa")
+    ap.add_argument("--log", default=None,
+                    help="ruta del CSV de registro (def. modelos/barrido.csv)")
+    return ap
 
 
 if __name__ == "__main__":
-    main()
+    args = construir_parser().parse_args()
+    if args.barrido:
+        barrido(args)
+    else:
+        main(args)
