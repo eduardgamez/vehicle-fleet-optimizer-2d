@@ -1,0 +1,52 @@
+{
+  "taskGroups": [
+    {
+      "taskCount": {{TAREAS}},
+      "parallelism": {{TAREAS}},
+      "taskSpec": {
+        "runnables": [
+          {
+            "container": {
+              "imageUri": "{{IMAGEN}}",
+              "entrypoint": "python",
+              "commands": [
+                "generador_nube.py",
+                "--escenarios", "{{ESCENARIOS}}",
+                "--calidad", "5",
+                "--opt", "mixto",
+                "--veh", "1-6,8",
+                "--workers", "32",
+                "--sync-min", "8"
+              ]
+            }
+          }
+        ],
+        "computeResource": {
+          "cpuMilli": 32000,
+          "memoryMib": 60000
+        },
+        "maxRetryCount": 8,
+        "maxRunDuration": "86400s",
+        "environment": {
+          "variables": {
+            "TDR_BUCKET": "{{BUCKET}}",
+            "TDR_DATOS": "/datos"
+          }
+        }
+      }
+    }
+  ],
+  "allocationPolicy": {
+    "instances": [
+      {
+        "policy": {
+          "machineType": "c4-highcpu-32",
+          "provisioningModel": "SPOT"
+        }
+      }
+    ]
+  },
+  "logsPolicy": {
+    "destination": "CLOUD_LOGGING"
+  }
+}

@@ -1,0 +1,69 @@
+{
+  "taskGroups": [
+    {
+      "taskCount": 1,
+      "parallelism": 1,
+      "taskSpec": {
+        "runnables": [
+          {
+            "script": {
+              "text": "gcloud storage rsync -r {{BUCKET}}/modelos /datos/modelos && gcloud storage rsync -r {{BUCKET}}/escenarios /datos/escenarios"
+            }
+          },
+          {
+            "container": {
+              "imageUri": "{{IMAGEN}}",
+              "entrypoint": "python",
+              "commands": [
+                "finalizar.py",
+                "--modelos", "/datos/modelos",
+                "--escenarios", "/datos/escenarios"
+              ],
+              "volumes": ["/datos:/datos"]
+            }
+          }
+        ],
+        "computeResource": {
+          "cpuMilli": 8000,
+          "memoryMib": 30000
+        },
+        "maxRetryCount": 2,
+        "maxRunDuration": "7200s",
+        "volumes": [
+          {
+            "deviceName": "trabajo",
+            "mountPath": "/datos"
+          }
+        ],
+        "environment": {
+          "variables": {
+            "TDR_BUCKET": "{{BUCKET}}",
+            "TDR_DATOS": "/datos"
+          }
+        }
+      }
+    }
+  ],
+  "allocationPolicy": {
+    "instances": [
+      {
+        "policy": {
+          "machineType": "c4-standard-8",
+          "provisioningModel": "STANDARD",
+          "disks": [
+            {
+              "deviceName": "trabajo",
+              "newDisk": {
+                "sizeGb": 100,
+                "type": "pd-balanced"
+              }
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "logsPolicy": {
+    "destination": "CLOUD_LOGGING"
+  }
+}

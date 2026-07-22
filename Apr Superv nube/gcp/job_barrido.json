@@ -1,0 +1,84 @@
+{
+  "taskGroups": [
+    {
+      "taskCount": {{TAREAS}},
+      "parallelism": {{TAREAS}},
+      "taskSpec": {
+        "runnables": [
+          {
+            "script": {
+              "text": "gcloud storage rsync -r {{BUCKET}}/muestras /datos/muestras && gcloud storage rsync -r {{BUCKET}}/escenarios /datos/escenarios"
+            }
+          },
+          {
+            "container": {
+              "imageUri": "{{IMAGEN}}",
+              "entrypoint": "python",
+              "commands": [
+                "entrenar_nube.py",
+                "--muestras", "/datos/muestras",
+                "--escenarios", "/datos/escenarios",
+                "--salida", "/datos/modelos",
+                "--n-configs", "{{CONFIGS}}",
+                "--fraccion-datos", "{{FRACCION}}",
+                "--espacio", "{{ESPACIO}}",
+                "--max-muestras", "12000000",
+                "--n-escenarios", "300",
+                "--criba", "0.5",
+                "--sync-min", "8"
+              ],
+              "volumes": [
+                "/datos:/datos",
+                "/var/lib/nvidia/lib64:/usr/local/nvidia/lib64",
+                "/var/lib/nvidia/bin:/usr/local/nvidia/bin"
+              ],
+              "options": "--privileged"
+            }
+          }
+        ],
+        "computeResource": {
+          "cpuMilli": 8000,
+          "memoryMib": 30000
+        },
+        "maxRetryCount": 8,
+        "maxRunDuration": "86400s",
+        "volumes": [
+          {
+            "deviceName": "trabajo",
+            "mountPath": "/datos"
+          }
+        ],
+        "environment": {
+          "variables": {
+            "TDR_BUCKET": "{{BUCKET}}",
+            "TDR_DATOS": "/datos",
+            "LD_LIBRARY_PATH": "/usr/local/nvidia/lib64"
+          }
+        }
+      }
+    }
+  ],
+  "allocationPolicy": {
+    "instances": [
+      {
+        "installGpuDrivers": true,
+        "policy": {
+          "machineType": "g2-standard-8",
+          "provisioningModel": "SPOT",
+          "disks": [
+            {
+              "deviceName": "trabajo",
+              "newDisk": {
+                "sizeGb": 200,
+                "type": "pd-balanced"
+              }
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "logsPolicy": {
+    "destination": "CLOUD_LOGGING"
+  }
+}

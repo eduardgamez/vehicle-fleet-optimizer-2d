@@ -1,0 +1,71 @@
+{
+  "taskGroups": [
+    {
+      "taskCount": 1,
+      "parallelism": 1,
+      "taskSpec": {
+        "runnables": [
+          {
+            "script": {
+              "text": "gcloud storage rsync -r {{BUCKET}}/rutas /datos/rutas"
+            }
+          },
+          {
+            "container": {
+              "imageUri": "{{IMAGEN}}",
+              "entrypoint": "python",
+              "commands": [
+                "preparar_datos.py",
+                "--rutas", "/datos/rutas",
+                "--salida", "/datos/muestras",
+                "--paso", "1",
+                "--procesos", "60"
+              ],
+              "volumes": ["/datos:/datos"]
+            }
+          }
+        ],
+        "computeResource": {
+          "cpuMilli": 60000,
+          "memoryMib": 230000
+        },
+        "maxRetryCount": 3,
+        "maxRunDuration": "21600s",
+        "volumes": [
+          {
+            "deviceName": "trabajo",
+            "mountPath": "/datos"
+          }
+        ],
+        "environment": {
+          "variables": {
+            "TDR_BUCKET": "{{BUCKET}}",
+            "TDR_DATOS": "/datos"
+          }
+        }
+      }
+    }
+  ],
+  "allocationPolicy": {
+    "instances": [
+      {
+        "policy": {
+          "machineType": "c4-standard-60",
+          "provisioningModel": "STANDARD",
+          "disks": [
+            {
+              "deviceName": "trabajo",
+              "newDisk": {
+                "sizeGb": 500,
+                "type": "pd-balanced"
+              }
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "logsPolicy": {
+    "destination": "CLOUD_LOGGING"
+  }
+}

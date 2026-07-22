@@ -1,0 +1,10 @@
+# Dependencias de las dos fases. numpy y numba las necesita el planificador
+# (fase 1, CPU); torch solo la fase 2 (GPU), pero va en la misma imagen para no
+# mantener dos.
+#
+# Las ruedas de torch traen dentro las librerías de CUDA, así que la máquina solo
+# necesita el driver de NVIDIA: no hace falta una imagen base con CUDA.
+numpy==2.4.2
+numba==0.66.0
+--extra-index-url https://download.pytorch.org/whl/cu124
+torch==2.6.0
