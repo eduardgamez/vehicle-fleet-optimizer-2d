@@ -1,0 +1,26 @@
+# Contexto de build para Cloud Build. Solo debe subir el CÓDIGO que el
+# Dockerfile copia (Apr Superv nube, 4 .py de Apr Superv local, el mapa de
+# entrenamiento). Nada de entornos, datasets ni la web.
+.git/
+.gcloudignore
+
+# Entornos y caches (los 4.6 GB de .venv van aquí)
+.venv/
+venv/
+env/
+ENV/
+**/__pycache__/
+*.py[cod]
+
+# Cosas del pipeline LOCAL/web que la imagen de nube no usa
+web/
+render.yaml
+server.py
+multi_vehiculo.py
+multi_v_evo.py
+
+# Mapas y datasets generados localmente (el Dockerfile solo necesita
+# mapas/mapa_entrenamiento.json, que NO casa con estos patrones)
+mapas/*
+!mapas/mapa_entrenamiento.json
+Apr Superv/rutas/*.csv

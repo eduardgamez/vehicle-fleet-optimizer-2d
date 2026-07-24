@@ -1,0 +1,19 @@
+# Build de la imagen de nube EN LA NUBE (sin Docker local).
+# El contexto es la raíz del proyecto (lo exige el Dockerfile, que copia de
+# varias carpetas), recortado por .gcloudignore.
+steps:
+  - name: gcr.io/cloud-builders/docker
+    env:
+      - DOCKER_BUILDKIT=1
+    args:
+      - build
+      - -f
+      - Apr Superv nube/Dockerfile
+      - -t
+      - ${_IMAGEN}
+      - .
+images:
+  - ${_IMAGEN}
+options:
+  machineType: E2_HIGHCPU_8
+timeout: 1800s
