@@ -123,7 +123,10 @@ def leer_runs(carpeta):
 # Construcción de muestras (una por vehículo e instante)
 # --------------------------------------------------------------------------- #
 def construir_muestras(runs):
-    X, Y = [], []
+    """Devuelve (X, Y, M): entradas, objetivos y el MODO de optimización de cada
+    muestra ('secuencial'/'global'/'prioridades'), para poder ponderar en el
+    entrenamiento los modos raros (ver `pesos_de_modos`)."""
+    X, Y, M = [], [], []
     for _, conds, opt, datos in runs:
         vids = [vid for vid in datos if vid in conds]
         n_veh = len(vids)               # tamaño de la flota vista en este run
@@ -163,8 +166,10 @@ def construir_muestras(runs):
                         obj[2 * k + 1] = (arr[t + k, 5]
                                           / max(p["giro_max"], 1e-6))
                 Y.append(obj)
+                M.append(opt)
     return (np.asarray(X, dtype=np.float32),
-            np.asarray(Y, dtype=np.float32))
+            np.asarray(Y, dtype=np.float32),
+            np.asarray(M))
 
 
 def es_validacion(clave_run):
@@ -263,10 +268,11 @@ def evaluar_rollout(politica, escenarios):
 # --------------------------------------------------------------------------- #
 # Entrenamiento de UNA red (reutilizado por el modo simple y por el barrido)
 # --------------------------------------------------------------------------- #
-def _a_tensores(Xtr, Ytr, Xva, Yva, media, escala, device):
+def _a_tensores(Xtr, Ytr, Wtr, Xva, Yva, media, escala, device):
     import torch
     return (torch.from_numpy((Xtr - media) / escala).to(device),
             torch.from_numpy(Ytr).to(device),
+            torch.from_numpy(np.asarray(Wtr, dtype=np.float32)).to(device),
             torch.from_numpy((Xva - media) / escala).to(device),
             torch.from_numpy(Yva).to(device))
 
@@ -281,7 +287,7 @@ def entrenar_red(red, tensores, device, epocas, lr, lote, weight_decay=0.01,
     el estado de la época con menor val (no toca disco)."""
     import copy
     import torch
-    Xtr_t, Ytr_t, Xva_t, Yva_t = tensores
+    Xtr_t, Ytr_t, Wtr_t, Xva_t, Yva_t = tensores
     if optimizador == "sgd":
         opt = torch.optim.SGD(red.parameters(), lr=lr * FACTOR_LR_SGD,
                               momentum=0.9, weight_decay=weight_decay)
@@ -290,6 +296,7 @@ def entrenar_red(red, tensores, device, epocas, lr, lote, weight_decay=0.01,
                                 weight_decay=weight_decay)
     plani = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epocas)
     perdida = torch.nn.MSELoss()
+    perdida_muestra = torch.nn.MSELoss(reduction="none")   # para ponderar
     mejor_val, mejor_estado = float("inf"), None
     for ep in range(1, epocas + 1):
         t0 = time.perf_counter()
@@ -299,7 +306,12 @@ def entrenar_red(red, tensores, device, epocas, lr, lote, weight_decay=0.01,
         for i in range(0, len(orden), lote):
             idx = orden[i:i + lote]
             opt.zero_grad()
-            l = perdida(red(Xtr_t[idx]), Ytr_t[idx])
+            # MSE ponderada por muestra: los modos raros (global/prioridades)
+            # pesan más (ver pesos_de_modos). Media por dims de salida y luego
+            # media ponderada sobre las muestras del lote.
+            err = perdida_muestra(red(Xtr_t[idx]), Ytr_t[idx]).mean(dim=1)
+            w = Wtr_t[idx]
+            l = (err * w).sum() / w.sum()
             l.backward()
             opt.step()
             tot += l.item() * len(idx)
@@ -343,16 +355,39 @@ def _guardar(ruta, cfg, media, escala, state):
                 "escala": escala.tolist(), "state_dict": state}, ruta)
 
 
+def pesos_de_modos(modos, enfasis=1.0):
+    """Peso por muestra según su modo, para que los modos RAROS (global,
+    prioridades) influyan más pese a ser minoría en los datos.
+
+    Parte del inverso de la frecuencia (equilibra la influencia total de cada
+    modo) elevado a 'enfasis': enfasis=0 → todos igual (sin ponderar); 1 →
+    influencia total equilibrada entre modos; >1 → los modos raros dominan. Se
+    normaliza a media 1 para no alterar el paso efectivo del optimizador."""
+    modos = np.asarray(modos)
+    pesos = np.ones(len(modos), dtype=np.float32)
+    if enfasis <= 0 or len(modos) == 0:
+        return pesos
+    unicos, cuentas = np.unique(modos, return_counts=True)
+    frec = dict(zip(unicos, cuentas))
+    n = len(modos)
+    for m, c in frec.items():
+        pesos[modos == m] = (n / (len(unicos) * c)) ** enfasis
+    pesos *= len(pesos) / pesos.sum()   # media 1
+    return pesos.astype(np.float32)
+
+
 def _preparar_datos(runs):
     """Divide en train/val por run y construye muestras con la representación
-    ACTUAL (pol.*). Devuelve (Xtr, Ytr, Xva, Yva)."""
+    ACTUAL (pol.*). Devuelve (Xtr, Ytr, Mtr, Xva, Yva); 'Mtr' es el modo de cada
+    muestra de train (para ponderar). La validación NO se pondera, para que la
+    selección de modelo siga siendo una cifra honesta."""
     r_tr = [r for r in runs if not es_validacion(r[0])]
     r_va = [r for r in runs if es_validacion(r[0])]
     if not r_va:                        # pocos runs: aparta el último
         r_va = [r_tr.pop()]
-    Xtr, Ytr = construir_muestras(r_tr)
-    Xva, Yva = construir_muestras(r_va)
-    return Xtr, Ytr, Xva, Yva
+    Xtr, Ytr, Mtr = construir_muestras(r_tr)
+    Xva, Yva, _ = construir_muestras(r_va)
+    return Xtr, Ytr, Mtr, Xva, Yva
 
 
 # --------------------------------------------------------------------------- #
@@ -367,7 +402,8 @@ def main(args):
         raise SystemExit("No hay runs en la carpeta de rutas: genera datos "
                          "primero con generador.py (o con la GUI).")
     pol.configurar_representacion(args.n_vecinos, args.horizonte, args.h_pasado)
-    Xtr, Ytr, Xva, Yva = _preparar_datos(runs)
+    Xtr, Ytr, Mtr, Xva, Yva = _preparar_datos(runs)
+    Wtr = pesos_de_modos(Mtr, getattr(args, "enfasis_modos", 1.0))
     print(f"[datos] {len(runs)} runs · {len(Xtr):,} muestras train / "
           f"{len(Xva):,} val (dim entrada {pol.DIM_ENTRADA})")
 
@@ -375,7 +411,7 @@ def main(args):
     escala = np.maximum(Xtr.std(axis=0), 1e-6)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[train] dispositivo: {device}")
-    tensores = _a_tensores(Xtr, Ytr, Xva, Yva, media, escala, device)
+    tensores = _a_tensores(Xtr, Ytr, Wtr, Xva, Yva, media, escala, device)
 
     arq = {"oculto": args.oculto, "n_capas": args.n_capas,
            "dropout": args.dropout, "activacion": args.activacion}
@@ -453,13 +489,17 @@ def _evaluar_config(c, runs, escenarios, device, epocas, cache):
     clave = (c["n_vecinos"], c["horizonte"], c["h_pasado"])
     # Fijar siempre los globales: el rollout posterior los consulta.
     pol.configurar_representacion(*clave)
-    if clave not in cache:
-        Xtr, Ytr, Xva, Yva = _preparar_datos(runs)
+    enf = c.get("enfasis_modos", 1.0)
+    clave_cache = clave + (enf,)          # el peso por modo depende del énfasis
+    if clave_cache not in cache:
+        Xtr, Ytr, Mtr, Xva, Yva = _preparar_datos(runs)
+        Wtr = pesos_de_modos(Mtr, enf)
         media = Xtr.mean(axis=0)
         escala = np.maximum(Xtr.std(axis=0), 1e-6)
-        cache[clave] = (_a_tensores(Xtr, Ytr, Xva, Yva, media, escala, device),
-                        media, escala, len(Xtr))
-    tensores, media, escala, n_muestras = cache[clave]
+        cache[clave_cache] = (
+            _a_tensores(Xtr, Ytr, Wtr, Xva, Yva, media, escala, device),
+            media, escala, len(Xtr))
+    tensores, media, escala, n_muestras = cache[clave_cache]
 
     red = crear_red(pol.DIM_ENTRADA, c["oculto"], pol.N_PRED,
                     c["n_capas"], c["dropout"], c["activacion"],
@@ -687,6 +727,11 @@ def construir_parser():
                     default=pol.N_VECINOS)
     ap.add_argument("--horizonte", type=int, default=pol.HORIZONTE_VECINO)
     ap.add_argument("--h-pasado", dest="h_pasado", type=int, default=pol.H_PASADO)
+    ap.add_argument("--enfasis-modos", dest="enfasis_modos", type=float,
+                    default=1.0,
+                    help="peso de los modos raros (global/prioridades) en el "
+                         "entrenamiento: 0 = sin ponderar, 1 = influencia "
+                         "equilibrada entre modos, >1 = los raros dominan")
     ap.add_argument("--salida", default=MODELO_PT)
     ap.add_argument("--barrido", action="store_true",
                     help="prueba muchas configs y guarda la de mejor nota rollout")

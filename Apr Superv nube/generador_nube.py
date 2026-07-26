@@ -32,12 +32,14 @@ Ejemplos:
 """
 
 import argparse
+import collections
+import json
 import math
 import multiprocessing
 import os
 import random
 import time
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, wait, FIRST_COMPLETED
 
 import comun
 from comun import MAPA_ENTRENAMIENTO, RUTAS_DIR, asegurar, reparto
@@ -93,6 +95,34 @@ def _leer_progreso(ruta):
         return {l.strip() for l in f if l.strip()}
 
 
+def _leer_candidatos(ruta):
+    """Candidatos ya evaluados de la tanda EN CURSO (checkpoint anti-corte de
+    spot). Cada línea es [semilla, modo, orden, fallos, coste]. Devuelve
+    (hechos, mejor): 'hechos' = conjunto de (semilla, modo, tuple(orden)) ya
+    calculados para no repetirlos, y 'mejor' = mejor orden por (semilla, modo) ya
+    encontrado. Así, si la máquina cae a media exploración de un escenario, al
+    reanudar solo se recalcula lo que faltaba (minutos), no las 400 ordenaciones.
+    """
+    hechos, mejor = set(), {}
+    if not os.path.exists(ruta):
+        return hechos, mejor
+    with open(ruta, encoding="utf-8") as f:
+        for linea in f:
+            linea = linea.strip()
+            if not linea:
+                continue
+            try:
+                sem, modo, orden, fallos, coste = json.loads(linea)
+            except (ValueError, TypeError):
+                continue                       # línea a medias por un corte
+            hechos.add((sem, modo, tuple(orden)))
+            clave = (fallos, coste, orden)
+            k = (sem, modo)
+            if k not in mejor or clave < mejor[k]:
+                mejor[k] = clave
+    return hechos, mejor
+
+
 # --------------------------------------------------------------------------- #
 # Escenarios: de una semilla a una flota, y cuántos órdenes explorarle
 # --------------------------------------------------------------------------- #
@@ -103,6 +133,40 @@ def elegir_modo(semilla, opt, mezcla=MEZCLA):
     if opt != "mixto":
         return opt
     return random.Random(semilla * 2 + 1).choices(MODOS_OPT, weights=mezcla)[0]
+
+
+def modos_de_semilla(semilla, opt, mezcla, pares=0.5):
+    """Lista de modos a GENERAR para una semilla (uno o dos runs).
+
+    Con opt != 'mixto': un único run en ese modo. Con 'mixto', la mezcla objetivo
+    (secuencial, global, prioridades) —a nivel de RUNS— se reparte por semilla con
+    un RNG propio (no altera la flota, igual que `elegir_modo`). Una fracción
+    'pares' de los global/prioridades se generan EMPAREJADOS: además del run en su
+    modo, un GEMELO en 'secuencial' de la MISMA situación, para que la red vea la
+    misma escena resuelta de las dos formas y aprenda a diferenciar el modo.
+
+    Los gemelos secuenciales CUENTAN dentro del secuencial: los pesos de rol se
+    derivan de la mezcla objetivo para que, contando los gemelos, la proporción de
+    runs siga siendo la de 'mezcla'. Ej.: mezcla (0.8, 0.1, 0.1) y pares=0.5 →
+    runs 80/10/10, con 5 % global y 5 % prioridades emparejados."""
+    if opt != "mixto":
+        return [opt]
+    s, g, p = mezcla
+    # Pesos de rol POR SEMILLA: [sec_puro, glo_solo, pri_solo, glo_par, pri_par].
+    # Cada rol emparejado produce 2 runs (su modo + gemelo secuencial); resolver
+    # para que la mezcla de RUNS resultante sea (s, g, p) da estos pesos.
+    pesos = [max(0.0, s - pares * (g + p)),
+             (1.0 - pares) * g, (1.0 - pares) * p,
+             pares * g, pares * p]
+    roles = ("sec", "glo_solo", "pri_solo", "glo_par", "pri_par")
+    rol = random.Random(semilla * 2 + 1).choices(roles, weights=pesos)[0]
+    return {
+        "sec": ["secuencial"],
+        "glo_solo": ["global"],
+        "pri_solo": ["prioridades"],
+        "glo_par": ["global", "secuencial"],
+        "pri_par": ["prioridades", "secuencial"],
+    }[rol]
 
 
 def sortear_preferencias(n):
@@ -129,14 +193,19 @@ def sortear_preferencias(n):
             random.choices(range(1, n_p + 1), weights=pesos_p, k=n))
 
 
-def construir_escenario(semilla, tamanos, opt, mezcla, env):
+def construir_escenario(semilla, tamanos, modo, env):
     """(modo, vehículos) de una semilla, o (modo, None) si la flota no cabe en el
     mapa. Es determinista, así que cualquier proceso reconstruye el mismo
     escenario a partir del número: por eso las tareas viajan como una semilla y
-    un orden, y no como flotas enteras."""
+    un orden, y no como flotas enteras.
+
+    El MODO entra como parámetro y NO interviene en el sorteo de la situación (la
+    elección de modo va con un RNG propio, ver `modos_de_semilla`). Por eso la
+    MISMA semilla da la MISMA flota en cualquier modo, lo que permite emparejar
+    un escenario resuelto en 'secuencial' con el mismo en 'global'/'prioridades'.
+    """
     random.seed(semilla)
     n = random.choice(tamanos)
-    modo = elegir_modo(semilla, opt, mezcla)
     especs = aleatorios_spec(env, n)
     if especs is None:
         return modo, None
@@ -282,21 +351,21 @@ def _iniciar(ruta_mapa, calidad):
 def _tarea_candidato(t):
     """Evalúa UN orden candidato. Su ruta se descarta: solo interesa cómo de
     bueno sale el orden, para poder elegir."""
-    semilla, tamanos, opt, mezcla, orden = t
-    _, vehiculos = construir_escenario(semilla, tamanos, opt, mezcla, _ENV)
+    semilla, tamanos, modo, orden = t
+    _, vehiculos = construir_escenario(semilla, tamanos, modo, _ENV)
     _PL.deadline = None
     _PL.max_exp = _CAP_CALIDAD
     trays, _, coste = planificar_orden(_PL, vehiculos, orden, Reservas(),
                                        deadline_dur=None)
     fallos = sum(1 for i in orden if trays[i] is None)
-    return semilla, orden, fallos, coste
+    return semilla, modo, orden, fallos, coste
 
 
 def _tarea_definitiva(t):
     """Planifica a tope el orden ganador y devuelve ya las filas del CSV."""
-    semilla, tamanos, opt, mezcla, orden = t
+    semilla, tamanos, modo, orden = t
     t0 = time.perf_counter()
-    modo, vehiculos = construir_escenario(semilla, tamanos, opt, mezcla, _ENV)
+    _, vehiculos = construir_escenario(semilla, tamanos, modo, _ENV)
     trays, _ = planificar_definitivo(_ENV, _PL, vehiculos, orden, _CAP_CALIDAD)
     for i, veh in enumerate(vehiculos):
         traj = trays.get(i)
@@ -311,38 +380,23 @@ def _tarea_definitiva(t):
             [veh_a_dict(v) for v in ok], filas, time.perf_counter() - t0)
 
 
-def _tandas(pendientes, tamanos, args, mezcla, env, n_workers):
-    """Agrupa escenarios en tandas con órdenes de sobra para llenar todos los
-    núcleos, sin que una tanda se alargue tanto que perder la máquina duela."""
-    tanda, ordenes_tanda = [], 0
-    for sem in pendientes:
-        modo, vehiculos = construir_escenario(sem, tamanos, args.opt, mezcla, env)
-        if vehiculos is None:                    # no cabía la flota en el mapa
-            tanda.append((sem, modo, None, 0))
-            continue
-        max_cand = ordenes_a_explorar(vehiculos, modo, args.fraccion_ordenes,
-                                      args.curvatura_ordenes, args.tope_ordenes)
-        ordenes = generar_ordenes(vehiculos, list(range(len(vehiculos))), modo,
-                                  max_cand)
-        tanda.append((sem, modo, ordenes, len(vehiculos)))
-        ordenes_tanda += len(ordenes)
-        if ordenes_tanda >= 8 * n_workers or len(tanda) >= 4 * n_workers:
-            yield tanda
-            tanda, ordenes_tanda = [], 0
-    if tanda:
-        yield tanda
-
-
 def generar(mias, args, tamanos, mezcla, idt):
     """Bucle principal de esta máquina. Devuelve (filas, veh_ok, veh, saltados)."""
     env = Entorno()
     cargar_mapa_en(env, args.mapa)
     asegurar(args.salida)
     prog_path = os.path.join(args.salida, f"progreso_t{idt:03d}.txt")
-    hechas = _leer_progreso(prog_path)
-    pendientes = [s for s in mias if str(s) not in hechas]
+    cand_path = os.path.join(args.salida, f"candidatos_t{idt:03d}.jsonl")
+    hechas = _leer_progreso(prog_path)          # claves "semilla:modo"
+    # Cada semilla produce uno o dos runs (ver modos_de_semilla); la unidad de
+    # trabajo y de reanudación es (semilla, modo). Una semilla emparejada aporta
+    # su modo (global/prioridades) y un gemelo 'secuencial' de la misma flota.
+    pendientes = [(sem, modo)
+                  for sem in mias
+                  for modo in modos_de_semilla(sem, args.opt, mezcla)
+                  if f"{sem}:{modo}" not in hechas]
     if hechas:
-        print(f"[gen] reanudando: {len(mias) - len(pendientes)} hechas, "
+        print(f"[gen] reanudando: {len(hechas)} hechas, "
               f"{len(pendientes)} pendientes", flush=True)
     if not pendientes:
         return 0, 0, 0, 0
@@ -352,59 +406,124 @@ def generar(mias, args, tamanos, mezcla, idt):
     filas_tot, veh_ok, veh_tot, saltados, hechos = 0, 0, 0, 0, 0
     t_ini = time.perf_counter()
 
+    # Planificador CONTINUO: en vez de tandas con barrera (todas las órdenes
+    # candidatas y LUEGO las definitivas), se mantiene una ventana de trabajo
+    # siempre llena. Así, mientras unos pocos planes lentos (p. ej. un global de
+    # 8 vehículos) siguen corriendo, ningún núcleo queda parado esperándolos: coge
+    # ya la siguiente candidata o definitiva de cualquier otro escenario. Nada se
+    # descarta ni se abarata: los lentos terminan igual, solo que no bloquean.
+    hechos_cand, mejor = _leer_candidatos(cand_path)
+    info = {}                              # (sem,modo) -> candidatas que faltan
+    listos_def = collections.deque()       # unidades listas para planificar a tope
+
+    def fuente_trabajo():
+        """Va emitiendo trabajo unidad a unidad (perezoso, para no construir de
+        golpe las flotas y órdenes de las 10 000): 'saltado', 'cand' o 'def'."""
+        for sem, modo in pendientes:
+            _, vehiculos = construir_escenario(sem, tamanos, modo, env)
+            if vehiculos is None:                     # la flota no cabía
+                yield ("saltado", sem, modo, None)
+                continue
+            n = len(vehiculos)
+            max_cand = ordenes_a_explorar(vehiculos, modo, args.fraccion_ordenes,
+                                          args.curvatura_ordenes, args.tope_ordenes)
+            ordenes = generar_ordenes(vehiculos, list(range(n)), modo, max_cand)
+            k = (sem, modo)
+            if ordenes and len(ordenes) > 1:
+                rest = [o for o in ordenes
+                        if (sem, modo, tuple(o)) not in hechos_cand]
+                if rest:
+                    info[k] = {"faltan": len(rest), "por_defecto": ordenes[0]}
+                    for o in rest:
+                        yield ("cand", sem, modo, o)
+                else:                                 # ya todo en el checkpoint
+                    orden = mejor[k][2] if k in mejor else ordenes[0]
+                    yield ("def", sem, modo, orden)
+            else:                                     # secuencial / 1 orden: directo
+                yield ("def", sem, modo, ordenes[0] if ordenes else list(range(n)))
+
+    ventana = 2 * n_workers
+    fuente = fuente_trabajo()
+    agotada = False
+    futs = {}
+
     with ProcessPoolExecutor(max_workers=n_workers, mp_context=ctx,
                              initializer=_iniciar,
                              initargs=(args.mapa, args.calidad)) as ex, \
-            open(prog_path, "a", encoding="utf-8") as fprog:
-        for tanda in _tandas(pendientes, tamanos, args, mezcla, env, n_workers):
-            # -- pasada 1: todos los órdenes candidatos de la tanda, en plano --
-            tareas = [(sem, tamanos, args.opt, mezcla, orden)
-                      for sem, _, ordenes, _ in tanda
-                      if ordenes and len(ordenes) > 1
-                      for orden in ordenes]
-            mejor = {}
-            for sem, orden, fallos, coste in ex.map(_tarea_candidato, tareas,
-                                                    chunksize=1):
-                # Se desempata por el propio orden: los resultados llegan en
-                # cualquier secuencia y la elección tiene que salir igual
-                # ejecute donde ejecute.
-                clave = (fallos, coste, orden)
-                if sem not in mejor or clave < mejor[sem]:
-                    mejor[sem] = clave
-
-            # -- pasada 2: el orden ganador de cada escenario, a tope ----------
-            definitivas = []
-            for sem, modo, ordenes, _ in tanda:
-                if ordenes is None:
-                    saltados += 1
-                    fprog.write(f"{sem}\n")
+            open(prog_path, "a", encoding="utf-8") as fprog, \
+            open(cand_path, "a", encoding="utf-8") as fcand:
+        while True:
+            # 1) rellenar la ventana: primero las definitivas listas (para ir
+            #    escribiendo cuanto antes), luego más trabajo de la fuente.
+            while len(futs) < ventana:
+                if listos_def:
+                    sem, modo, orden = listos_def.popleft()
+                    f = ex.submit(_tarea_definitiva, (sem, tamanos, modo, orden))
+                    futs[f] = ("def", sem, modo)
                     continue
-                orden = mejor[sem][2] if sem in mejor else ordenes[0]
-                definitivas.append((sem, tamanos, args.opt, mezcla, orden))
-            fprog.flush()
+                if agotada:
+                    break
+                try:
+                    tipo, sem, modo, orden = next(fuente)
+                except StopIteration:
+                    agotada = True
+                    break
+                if tipo == "saltado":
+                    saltados += 1
+                    fprog.write(f"{sem}:{modo}\n")
+                    fprog.flush()
+                elif tipo == "cand":
+                    f = ex.submit(_tarea_candidato, (sem, tamanos, modo, orden))
+                    futs[f] = ("cand", sem, modo)
+                else:
+                    f = ex.submit(_tarea_definitiva, (sem, tamanos, modo, orden))
+                    futs[f] = ("def", sem, modo)
 
-            for res in ex.map(_tarea_definitiva, definitivas, chunksize=1):
-                sem, modo, n, n_ok, condiciones, filas, dur = res
-                if filas:
-                    ruta_csv = os.path.join(
-                        args.salida, f"nveh_{n:02d}",
-                        f"rutas_c{args.calidad}_{modo}_t{idt:03d}.csv")
-                    filas_tot += escribir_run(ruta_csv, sem, modo, condiciones,
-                                              filas)
-                # El progreso se anota DESPUÉS de que el escenario esté en disco.
-                fprog.write(f"{sem}\n")
-                fprog.flush()
-                veh_ok += n_ok
-                veh_tot += n
-                hechos += 1
-                if hechos % args.cada == 0 or hechos == len(pendientes):
-                    t = time.perf_counter() - t_ini
-                    print(f"[gen] {hechos}/{len(pendientes)} · último: {n} veh. "
-                          f"{modo} {dur:.0f} s · {filas_tot:,} filas · "
-                          f"{veh_ok}/{veh_tot} con ruta · media "
-                          f"{t / hechos:.0f} s/escenario · faltan "
-                          f"~{t / hechos * (len(pendientes) - hechos) / 60:.0f} "
-                          f"min", flush=True)
+            if not futs:
+                break                                 # no queda nada por hacer
+
+            # 2) esperar a que se libere algún núcleo y procesar lo terminado.
+            for f in wait(futs, return_when=FIRST_COMPLETED).done:
+                tipo, sem, modo = futs.pop(f)
+                if tipo == "cand":
+                    s, m, orden, fallos, coste = f.result()
+                    # Se anota en el acto: si cae la máquina, no se repite.
+                    fcand.write(json.dumps([s, m, orden, fallos, coste]) + "\n")
+                    fcand.flush()
+                    k = (s, m)
+                    clave = (fallos, coste, orden)     # desempate por el orden
+                    if k not in mejor or clave < mejor[k]:
+                        mejor[k] = clave
+                    info[k]["faltan"] -= 1
+                    if info[k]["faltan"] == 0:          # ya se puede elegir ganador
+                        gana = mejor[k][2] if k in mejor else info[k]["por_defecto"]
+                        listos_def.append((s, m, gana))
+                        del info[k]
+                else:
+                    s, m, n, n_ok, condiciones, filas, dur = f.result()
+                    if filas:
+                        ruta_csv = os.path.join(
+                            args.salida, f"nveh_{n:02d}",
+                            f"rutas_c{args.calidad}_{m}_t{idt:03d}.csv")
+                        filas_tot += escribir_run(ruta_csv, s, m, condiciones,
+                                                  filas)
+                    # El progreso se anota DESPUÉS de que el escenario esté en disco.
+                    fprog.write(f"{s}:{m}\n")
+                    fprog.flush()
+                    veh_ok += n_ok
+                    veh_tot += n
+                    hechos += 1
+                    if hechos % args.cada == 0:
+                        t = time.perf_counter() - t_ini
+                        print(f"[gen] {hechos}/{len(pendientes)} · último: {n} "
+                              f"veh. {m} {dur:.0f} s · {filas_tot:,} filas · "
+                              f"{veh_ok}/{veh_tot} con ruta · media "
+                              f"{t / hechos:.0f} s/run", flush=True)
+
+            # Tanda completa y volcada a disco: su checkpoint de candidatos ya
+            # no hace falta. Se vacía para que el fichero no crezca y para
+            # empezar limpia la siguiente tanda.
+            open(cand_path, "w", encoding="utf-8").close()
     return filas_tot, veh_ok, veh_tot, saltados
 
 
