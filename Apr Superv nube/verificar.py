@@ -86,7 +86,9 @@ def verificar_muestras(runs, n_vec_max, h_max, hor_max):
     for n_vec, horizonte, h_pasado in casos:
         if n_vec > n_vec_max or h_pasado > h_max or horizonte > hor_max:
             continue
-        Xr, Yr = _muestras_referencia(runs, n_vec, horizonte, h_pasado)
+        # construir_muestras devuelve (X, Y, M): la M es la etiqueta de modo de
+        # cada fila, que aquí no se compara (no forma parte de la entrada).
+        Xr, Yr = _muestras_referencia(runs, n_vec, horizonte, h_pasado)[:2]
         (Xn, Yn) = _muestras_nube(runs, n_vec, horizonte, h_pasado,
                                   n_vec_max, h_max, hor_max)
         etiqueta = f"n_vecinos={n_vec} horizonte={horizonte} h_pasado={h_pasado}"

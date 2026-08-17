@@ -55,17 +55,28 @@ def leer_archivo(arch):
     """[(run_id, condiciones, modo_opt, {vid: array (n, 6)})] de un CSV.
 
     Descarta runs repetidos (una semilla reintentada tras un corte) y filas mal
-    formadas (la última línea de un fichero que se quedó a medias)."""
+    formadas (la última línea de un fichero que se quedó a medias).
+
+    El duplicado se detecta por el CONTENIDO, no por el identificador: varios
+    runs del mismo escenario comparten identificador a propósito (los órdenes
+    reutilizados y las gemelas salen de la misma planificación), y descartarlos
+    por el id se llevaba por delante justo esos —un 24 % del dataset—. Una
+    semilla reintentada tras un corte, en cambio, reescribe filas IDÉNTICAS."""
     from entrenar import _parsear_condiciones
     runs, vistos = [], set()
     conds, filas, run_actual, opt_actual = None, {}, None, "secuencial"
 
     def cerrar():
-        if conds and filas and run_actual not in vistos:
-            vistos.add(run_actual)
-            runs.append((run_actual, conds, opt_actual,
-                         {vid: np.array(v, dtype=np.float64)
-                          for vid, v in filas.items()}))
+        if not (conds and filas):
+            return
+        datos = {vid: np.array(v, dtype=np.float64) for vid, v in filas.items()}
+        huella = (run_actual, opt_actual,
+                  zlib.crc32(b"".join(datos[vid].tobytes()
+                                      for vid in sorted(datos))))
+        if huella in vistos:
+            return
+        vistos.add(huella)
+        runs.append((run_actual, conds, opt_actual, datos))
 
     with open(arch, encoding="utf-8") as f:
         for linea in f:
@@ -99,6 +110,19 @@ def leer_archivo(arch):
     return runs
 
 
+# Tipos de escenario, en el orden en que se codifican por fila. Se guardan junto
+# a las muestras para poder ajustar DESPUÉS la mezcla del entrenamiento (cuánta
+# proporción de cada tipo) sin volver a leer los CSV.
+ETIQUETAS = ("secuencial", "secuencial_rec", "global", "prioridades")
+
+
+def codigo_etiqueta(opt):
+    """Índice de la etiqueta en ETIQUETAS (−1 si es una desconocida)."""
+    from entrenar import ALIAS_ETIQUETA
+    e = ALIAS_ETIQUETA.get(opt, opt)
+    return ETIQUETAS.index(e) if e in ETIQUETAS else -1
+
+
 def es_validacion(run_id):
     """~10 % de los runs a validación, estable entre ejecuciones (mismo criterio
     que el pipeline local). Es la validación por MSE, que solo sirve para elegir
@@ -110,17 +134,28 @@ def es_validacion(run_id):
 # Worker: un CSV → un lote de .npy
 # --------------------------------------------------------------------------- #
 def procesar(tarea):
+    from entrenar import MODO_ENTRADA
     arch, salida, paso, etiqueta = tarea
     runs = leer_archivo(arch)
-    Xs, TCs, Ys, Vs = [], [], [], []
+    Xs, TCs, Ys, Vs, Ms, Ns = [], [], [], [], [], []
     for run_id, conds, opt, datos in runs:
-        X, TC, Y = vec.superset_run(conds, opt, datos, N_VEC_MAX, H_MAX, HOR_MAX)
+        # En la ENTRADA de la red va el modo de PLANIFICACIÓN: las reutilizadas
+        # y las gemelas se planificaron como secuencial. Sin esta traducción su
+        # one-hot de modo se quedaría todo a CERO, un código de contexto que en
+        # el uso real no aparece nunca (igual que en el pipeline local).
+        X, TC, Y = vec.superset_run(conds, MODO_ENTRADA.get(opt, opt), datos,
+                                    N_VEC_MAX, H_MAX, HOR_MAX)
         if paso > 1:
             X, TC, Y = X[::paso], TC[::paso], Y[::paso]
         Xs.append(X)
         TCs.append(TC)
         Ys.append(Y)
         Vs.append(np.full(len(X), es_validacion(run_id), dtype=bool))
+        # Etiqueta REAL del run y tamaño de flota, por fila: es lo que permite
+        # luego elegir la mezcla de tipos y el % del dataset sin rehacer nada.
+        Ms.append(np.full(len(X), codigo_etiqueta(opt), dtype=np.int8))
+        Ns.append(np.full(len(X), sum(1 for v in datos if v in conds),
+                          dtype=np.int8))
     if not Xs:
         return etiqueta, 0, len(runs)
     X = np.concatenate(Xs)
@@ -128,6 +163,8 @@ def procesar(tarea):
     np.save(os.path.join(salida, f"{etiqueta}_TC.npy"), np.concatenate(TCs))
     np.save(os.path.join(salida, f"{etiqueta}_Y.npy"), np.concatenate(Ys))
     np.save(os.path.join(salida, f"{etiqueta}_val.npy"), np.concatenate(Vs))
+    np.save(os.path.join(salida, f"{etiqueta}_modo.npy"), np.concatenate(Ms))
+    np.save(os.path.join(salida, f"{etiqueta}_nveh.npy"), np.concatenate(Ns))
     return etiqueta, len(X), len(runs)
 
 
@@ -171,6 +208,7 @@ def main():
     meta = {"n_vec_max": N_VEC_MAX, "h_max": H_MAX, "hor_max": HOR_MAX,
             "dim_super": vec.dim_super(N_VEC_MAX, H_MAX), "n_pred": pol.N_PRED,
             "paso": args.paso, "filas": filas, "runs": runs,
+            "etiquetas": list(ETIQUETAS),
             "lotes": [e for e, _ in lotes]}
     with open(os.path.join(args.salida, "meta.json"), "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)

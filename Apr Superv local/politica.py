@@ -278,7 +278,15 @@ class Politica:
 # --------------------------------------------------------------------------- #
 # Despliegue en bucle cerrado sobre una flota (mismo modelo de bicicleta)
 # --------------------------------------------------------------------------- #
-def rollout_multiflota(flotas, politica, t_max=180.0, opts=None):
+# Segundos SIMULADOS que se le dan a una flota para llegar. La ruta más larga
+# del dataset dura 107 s, así que esto deja margen de sobra para una red más
+# lenta que el planificador clásico sin dar por fallido a quien sí habría
+# llegado. No puede quitarse: una red que conduzca en círculos no terminaría
+# nunca. En cuanto llegan todos, la simulación sale sola.
+T_MAX = 300.0
+
+
+def rollout_multiflota(flotas, politica, t_max=T_MAX, opts=None):
     """Simula VARIAS flotas independientes a la vez, agrupando en UNA sola consulta
     a la red todos los vehículos activos de todas ellas. Cada vehículo recibe
     exactamente las mismas entradas que en rollout_flota —los vecinos siguen siendo
@@ -353,7 +361,7 @@ def rollout_multiflota(flotas, politica, t_max=180.0, opts=None):
     return llegados
 
 
-def rollout_flota(vehiculos, politica, t_max=180.0, opt="secuencial"):
+def rollout_flota(vehiculos, politica, t_max=T_MAX, opt="secuencial"):
     """Simula la flota entera con la red: cada N_PRED pasos consulta la red (una
     pasada por vehículo activo, en lote) y aplica los controles predichos con el
     modelo de bicicleta. Escribe veh.traj y veh.mision_ok; devuelve el nº de

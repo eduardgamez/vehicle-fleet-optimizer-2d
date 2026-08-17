@@ -102,6 +102,8 @@ def leer_runs(carpeta):
                             run_actual = linea.split("run=", 1)[1].split()[0]
                             opt_actual = ("secuencial" if "opt=" not in linea
                                           else linea.split("opt=", 1)[1].split()[0])
+                            opt_actual = ALIAS_ETIQUETA.get(opt_actual,
+                                                            opt_actual)
                         except Exception:
                             conds = None          # comentario corrupto: se salta
                     continue
@@ -116,18 +118,161 @@ def leer_runs(carpeta):
                 filas.setdefault(vid, []).append(
                     ((x1 + x2) / 2.0, (y1 + y2) / 2.0, th, v, a, giro))
         cerrar()
-    return runs
+    return _capar_recuperados(runs)
+
+
+# Como MUCHO esta fracción de los runs secuenciales puede venir de órdenes
+# rescatados de casos de prioridades. Son gratis (su ruta ya estaba calculada al
+# comparar órdenes), así que sin tope acabarían siendo mayoría y la red
+# aprendería "secuencial" sobre todo de flotas que en realidad se generaron
+# para otra cosa.
+FRAC_MAX_RECUPERADOS = 0.4
+
+# Etiquetas de los CSV que se unifican al leer. Las 'secuencial_par' son las
+# GEMELAS del sistema viejo (una situación pensada para global/grupos, resuelta
+# TAMBIÉN en secuencial). Se desmanteló porque los órdenes descartados que ahora
+# se reaprovechan dan lo mismo gratis, y quedaron 10 runs sueltos.
+#
+# Cuentan como secuencial PURA, no como reutilizadas: sus rutas se planificaron
+# en secuencial de principio a fin, igual que cualquier otra secuencial. Lo
+# único que tienen de particular es de dónde salió la situación de partida, y
+# eso no sesga las rutas. Las reutilizadas, en cambio, sí llegan sesgadas (solo
+# se puede rescatar un orden que respete grupo y prioridad), y por eso a ellas
+# sí se les baja el peso.
+ALIAS_ETIQUETA = {"secuencial_par": "secuencial"}
+
+
+def _capar_recuperados(runs):
+    """Limita los runs 'secuencial_rec' a FRAC_MAX_RECUPERADOS del total de
+    secuenciales. Al descartar el sobrante se barajan primero de forma estable
+    (por su clave, no por el orden de lectura): así los que sobreviven quedan
+    repartidos entre escenarios de origen distintos en vez de amontonarse en los
+    primeros ficheros leídos."""
+    rec = [r for r in runs if r[2] == "secuencial_rec"]
+    otros = [r for r in runs if r[2] != "secuencial_rec"]
+    if not rec:
+        return runs
+    n_sec = sum(1 for r in otros if r[2].startswith("secuencial"))
+    # n_rec / (n_sec + n_rec) <= f  →  n_rec <= f/(1-f) · n_sec
+    f = FRAC_MAX_RECUPERADOS
+    tope = int(n_sec * f / (1.0 - f)) if f < 1.0 else len(rec)
+    if len(rec) > tope:
+        rec.sort(key=lambda r: zlib.crc32(r[0].encode()))
+        rec = rec[:tope]
+    return otros + rec
+
+
+# --------------------------------------------------------------------------- #
+# Submuestreo del DATASET (pasadas con el 35 % / 70 % / 100 % de los datos)
+# --------------------------------------------------------------------------- #
+def _n_veh_de(run):
+    """Tamaño de la flota de un run (los vehículos con condiciones iniciales)."""
+    _, conds, _, datos = run
+    return sum(1 for vid in datos if vid in conds)
+
+
+def _orden_submuestreo(clave):
+    """Orden pseudoaleatorio ESTABLE de un run dentro de su estrato. El prefijo
+    lo desacopla del hash que decide la validación (es_validacion), que también
+    es un crc32 de la clave: sin él, quedarse con los primeros sesgaría el
+    reparto train/val."""
+    return zlib.crc32(("submuestreo:" + clave).encode())
+
+
+def submuestrear_runs(runs, frac=1.0, frac_modos=None, verbose=True):
+    """Se queda con una fracción de los runs de ENTRENAMIENTO (los de validación
+    pasan enteros, para que el val_mse siga siendo comparable entre pasadas).
+
+    El recorte es ESTRATIFICADO por (etiqueta de modo, nº de vehículos): dentro
+    de cada combinación se conserva la misma proporción, así que el subconjunto
+    mantiene la mezcla de modos Y el reparto de tamaños de flota del dataset
+    completo. Dentro de cada estrato la elección es pseudoaleatoria pero fija
+    (hash de la clave del run), de modo que:
+      · queda uniforme en TODO lo demás (escenario de origen, fichero, semilla,
+        grupos/prioridades…), porque no se ordena por ninguna de esas variables;
+      · los subconjuntos ANIDAN: el 35 % es un subconjunto del 70 %, y este del
+        100 %. Así la pasada fina reaprovecha lo visto en la amplia en vez de
+        cambiar de datos a mitad del plan.
+
+    'frac_modos' permite pedir una proporción distinta por etiqueta, p. ej.
+    {"global": 1.0, "prioridades": 1.0}: los modos raros se conservan enteros y
+    solo se recortan los secuenciales, que son los que sobran."""
+    frac_modos = frac_modos or {}
+    if frac >= 1.0 and not frac_modos:
+        return runs
+    va = [r for r in runs if es_validacion(r[0])]
+    tr = [r for r in runs if not es_validacion(r[0])]
+
+    estratos = {}
+    for r in tr:
+        estratos.setdefault((r[2], _n_veh_de(r)), []).append(r)
+
+    elegidos, resumen = [], {}
+    for (modo, n_veh), grupo in estratos.items():
+        f = min(1.0, max(0.0, frac_modos.get(modo, frac)))
+        grupo.sort(key=lambda r: _orden_submuestreo(r[0]))
+        # Se redondea al alza (y nunca a cero si se pide algo) para que los
+        # estratos pequeños —las flotas grandes, que son las escasas— no
+        # desaparezcan del subconjunto.
+        n = 0 if f <= 0 else max(1, int(math.ceil(f * len(grupo))))
+        elegidos.extend(grupo[:n])
+        d = resumen.setdefault(modo, [0, 0])
+        d[0] += n
+        d[1] += len(grupo)
+
+    if verbose:
+        tot_n = sum(v[0] for v in resumen.values())
+        tot_d = sum(v[1] for v in resumen.values()) or 1
+        det = " · ".join(f"{m} {v[0]}/{v[1]}" for m, v in sorted(resumen.items()))
+        print(f"[datos] submuestreo train {tot_n}/{tot_d} runs "
+              f"({100.0 * tot_n / tot_d:.0f} %) · {det} · "
+              f"validación entera ({len(va)} runs)")
+    return elegidos + va
+
+
+def parsear_frac_modos(texto):
+    """'global=1,prioridades=1,secuencial=0.35' → dict. Devuelve {} si es None."""
+    if not texto:
+        return {}
+    out = {}
+    for trozo in texto.split(","):
+        trozo = trozo.strip()
+        if not trozo:
+            continue
+        if "=" not in trozo:
+            raise SystemExit(f"--frac-modos: falta '=' en '{trozo}'")
+        k, v = trozo.split("=", 1)
+        k = ALIAS_ETIQUETA.get(k.strip(), k.strip())
+        try:
+            out[k] = float(v)
+        except ValueError:
+            raise SystemExit(f"--frac-modos: '{v}' no es un número")
+    return out
 
 
 # --------------------------------------------------------------------------- #
 # Construcción de muestras (una por vehículo e instante)
 # --------------------------------------------------------------------------- #
+# La ETIQUETA guardada en el CSV no siempre es un modo de planificación real.
+# 'secuencial_par' es el gemelo secuencial de un escenario pensado para
+# global/prioridades: se planificó COMO secuencial, así que en la ENTRADA de la
+# red le toca el one-hot de 'secuencial'. Sin esta traducción, vector_entrada no
+# reconoce la etiqueta y deja el one-hot de modo a CERO — un código de contexto
+# que en inferencia no se da nunca, porque el usuario siempre elige uno de los
+# tres modos reales. La etiqueta se conserva aparte, en M, que es lo que usa
+# pesos_de_modos para darle la sensibilidad intermedia.
+MODO_ENTRADA = {"secuencial_par": "secuencial",
+                "secuencial_rec": "secuencial"}
+
+
 def construir_muestras(runs):
-    """Devuelve (X, Y, M): entradas, objetivos y el MODO de optimización de cada
-    muestra ('secuencial'/'global'/'prioridades'), para poder ponderar en el
-    entrenamiento los modos raros (ver `pesos_de_modos`)."""
+    """Devuelve (X, Y, M): entradas, objetivos y la ETIQUETA de cada muestra
+    ('secuencial'/'secuencial_par'/'global'/'prioridades'), para poder ponderar
+    en el entrenamiento los modos raros (ver `pesos_de_modos`). Ojo: en X va el
+    modo de PLANIFICACIÓN (ver MODO_ENTRADA), en M la etiqueta."""
     X, Y, M = [], [], []
     for _, conds, opt, datos in runs:
+        opt_x = MODO_ENTRADA.get(opt, opt)      # el que ve la red
         vids = [vid for vid in datos if vid in conds]
         n_veh = len(vids)               # tamaño de la flota vista en este run
         for vid in vids:
@@ -143,7 +288,7 @@ def construir_muestras(runs):
                        "giro_max": p["giro_max"], "grupo": p["grupo"],
                        "prioridad": p["prioridad"], "meta": p["meta"],
                        "meta_th": p["meta_th"], "pasado": pasado,
-                       "opt": opt, "n_veh": n_veh}
+                       "opt": opt_x, "n_veh": n_veh}
                 otros = []
                 for ov in vids:
                     if ov == vid:
@@ -186,11 +331,29 @@ def es_validacion(clave_run):
 ESCALA_DIST = 2.0
 ESCALA_ANG = math.radians(30.0)
 
+# Techo de la nota de un vehículo que ha chocado. Queda por debajo del 0,5 que
+# como mucho saca uno que no llega pero conduce limpio, así que chocar nunca
+# puede salir a cuenta.
+FACTOR_CHOQUE = 0.1
+
 
 def _puntuar_vehiculo(veh):
     """Nota POSITIVA de un vehículo tras el rollout:
-      · llega a destino (mision_ok)      → 1 + ang        (rango 1..2, ALTA),
-      · no llega                         → 0.5·prox·(0.5+0.5·ang)   (BAJA, variable)
+      · llega sin chocar (mision_ok)     → 1 + ang        (rango 1..2, ALTA),
+      · no llega, sin chocar             → 0.5·prox·(0.5+0.5·ang)   (0..0,5)
+      · CHOCA, llegue o no               → 0.1·prox·(0.5+0.5·ang)   (0..0,1)
+
+    Los tres tramos no se solapan, así que chocar es SIEMPRE peor que cualquier
+    resultado limpio, aunque el que choca llegue y el limpio no. Eso es lo
+    innegociable: como el simulador no altera la física al chocar, un vehículo
+    que atraviesa a otro llegaría igual de bien a su plaza, y sin esto esas
+    redes ganarían el barrido.
+
+    Lo que no se hace es anular la nota del todo. Al principio de una búsqueda
+    casi todas las redes chocan con casi todo, y con un cero plano no habría
+    forma de distinguir a la que se estrella al salir de la que casi llega:
+    dentro del tramo de choque se sigue premiando acercarse, que es la pista
+    que necesita el buscador para ir mejorando.
     donde 'prox' = e^(−d/ESCALA_DIST) premia acabar cerca de la meta y 'ang' =
     e^(−|Δθ|/ESCALA_ANG) premia acabar con el ángulo de llegada exigido (1.0 si el
     ángulo es libre). Así "llegar en buen ángulo" domina y el resto puntúa poco
@@ -209,6 +372,8 @@ def _puntuar_vehiculo(veh):
         ang = 1.0
     else:
         ang = math.exp(-abs(ang_norm(fth - veh.meta_th)) / ESCALA_ANG)
+    if getattr(veh, "choque", False):
+        return FACTOR_CHOQUE * prox * (0.5 + 0.5 * ang)
     if veh.mision_ok:
         return 1.0 + ang
     return 0.5 * prox * (0.5 + 0.5 * ang)
@@ -355,23 +520,59 @@ def _guardar(ruta, cfg, media, escala, state):
                 "escala": escala.tolist(), "state_dict": state}, ruta)
 
 
-def pesos_de_modos(modos, enfasis=1.0):
-    """Peso por muestra según su modo, para que los modos RAROS (global,
-    prioridades) influyan más pese a ser minoría en los datos.
+#   secuencial pura           → sensibilidad BASE (nunca se sube). Incluye las
+#     (y las gemelas)             gemelas, ver ALIAS_ETIQUETA
+#   secuencial_rec            → BASE, y además rebajada a la mitad por
+#     (reutilizadas)              PESO_SUB_MODO: llegan sesgadas hacia flotas
+#                                 con jerarquías planas
+#   global / prioridades      → sensibilidad ALTA (todo 'enfasis')
+NIVEL_MODO = {"secuencial": 0.0, "secuencial_rec": 0.0,
+              "global": 1.0, "prioridades": 1.0}
 
-    Parte del inverso de la frecuencia (equilibra la influencia total de cada
-    modo) elevado a 'enfasis': enfasis=0 → todos igual (sin ponderar); 1 →
-    influencia total equilibrada entre modos; >1 → los modos raros dominan. Se
-    normaliza a media 1 para no alterar el paso efectivo del optimizador."""
+# Modos que pesan MENOS que la base. NIVEL_MODO solo sabe subir la sensibilidad
+# por encima del secuencial puro; esto es el mando para bajarla.
+#
+# 'secuencial_rec' son órdenes descartados de casos global/grupos que se
+# reaprovechan. Son datos buenos y gratis, pero llegan sesgados: un orden solo
+# se puede reaprovechar si respeta grupo y prioridad, y eso ocurre mucho más en
+# flotas con pocos grupos/prioridades distintos (más empates → más órdenes
+# válidos). O sea que sobre-representan las jerarquías planas. Al valer la
+# mitad, aportan sin arrastrar la red hacia ese tipo de flota.
+PESO_SUB_MODO = {"secuencial_rec": 0.5}
+
+
+def pesos_de_modos(modos, enfasis=1.0):
+    """Peso por muestra según su modo/etiqueta, en TRES niveles de sensibilidad
+    (ver NIVEL_MODO): la secuencial pura no se toca; su gemela (una situación
+    pensada para global/prioridades pero resuelta en secuencial) recibe una
+    sensibilidad intermedia; global y prioridades reciben la sensibilidad alta.
+
+    Dentro de cada nivel activo se usa el inverso de la frecuencia (para que
+    dentro de "alta" ni global ni prioridades se coman entre sí si una es más
+    rara que la otra), elevado a 'enfasis · nivel'. 'enfasis' global sigue
+    siendo el mando único: 0 = sin ponderar nada, 1 = valores por defecto de
+    NIVEL_MODO, >1 exagera. Se normaliza a media 1 para no alterar el paso
+    efectivo del optimizador."""
     modos = np.asarray(modos)
     pesos = np.ones(len(modos), dtype=np.float32)
     if enfasis <= 0 or len(modos) == 0:
         return pesos
+    n = len(modos)
     unicos, cuentas = np.unique(modos, return_counts=True)
     frec = dict(zip(unicos, cuentas))
-    n = len(modos)
+    # Nº de modos PRESENTES, no de entradas de la tabla: si se contase la tabla,
+    # añadirle una etiqueta nueva (aunque sea de nivel base, que ni entra en el
+    # bucle) movería los pesos de todos los demás sin motivo.
+    n_niveles = len(unicos)
     for m, c in frec.items():
-        pesos[modos == m] = (n / (len(unicos) * c)) ** enfasis
+        nivel = NIVEL_MODO.get(m, 1.0)   # modo desconocido: se trata como "alta"
+        if nivel <= 0:
+            continue                     # base: se queda en 1
+        pesos[modos == m] = (n / (n_niveles * c)) ** (enfasis * nivel)
+    for m, sub in PESO_SUB_MODO.items():
+        # Se aplica DESPUÉS de los niveles y ANTES de normalizar, para que
+        # rebajar un modo no altere la proporción entre los demás.
+        pesos[modos == m] *= sub ** enfasis
     pesos *= len(pesos) / pesos.sum()   # media 1
     return pesos.astype(np.float32)
 
@@ -401,6 +602,8 @@ def main(args):
     if not runs:
         raise SystemExit("No hay runs en la carpeta de rutas: genera datos "
                          "primero con generador.py (o con la GUI).")
+    runs = submuestrear_runs(runs, args.frac_datos,
+                             parsear_frac_modos(args.frac_modos))
     pol.configurar_representacion(args.n_vecinos, args.horizonte, args.h_pasado)
     Xtr, Ytr, Mtr, Xva, Yva = _preparar_datos(runs)
     Wtr = pesos_de_modos(Mtr, getattr(args, "enfasis_modos", 1.0))
@@ -440,19 +643,37 @@ def main(args):
 # problema, no de la red: los escenarios tienen 2-6 vehículos, así que un vehículo
 # nunca ve más de 5 vecinos (valores mayores serían bloques siempre a cero); y el
 # horizonte del filtro debe ser >= N_PRED (10), los pasos que la red compromete en
-# bucle abierto. Total: 77 760 combinaciones.
+# bucle abierto.
+#
+# El techo de TAMAÑO de red es alto a propósito (hasta ~80 M de parámetros). La
+# GPU va sobrada con las redes pequeñas —rinde a un 10 % de su capacidad—, así
+# que agrandar sale casi gratis, y el mapa no se codifica en la entrada: la red
+# tiene que aprendérselo de las coordenadas, y eso pide capacidad. El límite real
+# no es la tarjeta sino los datos (612 k muestras), y de eso se encargan
+# 'dropout' y 'weight_decay', que por eso llegan más arriba que antes.
+#
+# Hubo un recorte (fuera 'sgd' y las redes de 6 capas) basado en la primera
+# fase aleatoria. Se ha DESHECHO: aquella nota no miraba las colisiones, así
+# que medía otra cosa y no sirve para descartar nada. Además, el mapa no entra
+# como dato en la red —se entrena y se usa siempre sobre el mismo, así que
+# tiene que memorizarlo—, y memorizar pide parámetros: las redes profundas son
+# justo las que no convenía quitar.
 ESPACIO = {
-    "n_capas":      [2, 3, 4],
-    "oculto":       [256, 512, 1024],
-    "dropout":      [0.0, 0.1],
+    "n_capas":      [2, 3, 4, 6],
+    "oculto":       [256, 512, 1024, 2048, 4096],
+    "dropout":      [0.0, 0.1, 0.2],
     "activacion":   ["relu", "gelu", "silu"],
     "lr":           [1e-3, 3e-3, 8e-3],
-    "lote":         [512, 2048],
+    "lote":         [512, 2048, 8192, 16384],
     "n_vecinos":    [2, 3, 5],
     "h_pasado":     [3, 5, 10],
     "horizonte":    [10, 15, 20],
-    "epocas":       [40, 80],
-    "weight_decay": [0.0, 0.01],
+    # Presupuesto único. Dejó de ser un eje de búsqueda: era a la vez algo que
+    # el muestreador elegía y algo que los peajes de la fase 2 recortaban, y eso
+    # hacía que dos candidatas idénticas salvo por el presupuesto compitieran
+    # sin que la diferencia significase nada.
+    "epocas":       [80],
+    "weight_decay": [0.0, 0.01, 0.1],
     "normalizacion": ["no", "layernorm"],
     "optimizador":  ["adamw", "sgd"],
 }
@@ -522,8 +743,8 @@ def _trabajar_configs(tarea):
     gigabytes de pesos entre procesos)."""
     import csv
     import torch
-    wid, configs, claves, rutas, epocas, log_w = tarea
-    runs = leer_runs(rutas)
+    wid, configs, claves, rutas, epocas, log_w, frac, frac_modos = tarea
+    runs = submuestrear_runs(leer_runs(rutas), frac, frac_modos, verbose=False)
     escenarios = escenarios_eval(rutas)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     cache, mejor = {}, None
@@ -558,6 +779,10 @@ def barrido(args):
     runs = leer_runs(args.rutas)
     if not runs:
         raise SystemExit("No hay runs: genera datos primero con generador.py.")
+    frac_modos = parsear_frac_modos(args.frac_modos)
+    runs = submuestrear_runs(runs, args.frac_datos, frac_modos)
+    # El rollout se hace SIEMPRE con todos los escenarios: es la métrica que
+    # decide el ganador y tiene que ser comparable entre las tres pasadas.
     escenarios = escenarios_eval(args.rutas)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -584,8 +809,12 @@ def barrido(args):
         todas = todas[:max(1, n)]
     configs = [dict(zip(claves, vals)) for vals in todas]
 
+    # Cada pasada (35 % / 70 % / 100 %) lleva su PROPIO registro: las notas de
+    # una no son comparables con las de otra, y compartir fichero haría que la
+    # reanudación diese por evaluadas configs entrenadas con menos datos.
+    suf = "" if args.frac_datos >= 1.0 else f"_f{int(round(args.frac_datos * 100))}"
     log_path = args.log or os.path.join(os.path.dirname(args.salida),
-                                        "barrido.csv")
+                                        f"barrido{suf}.csv")
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
     campos = claves + CAMPOS_EXTRA
 
@@ -642,7 +871,7 @@ def barrido(args):
                                     c["h_pasado"]))
         trozos = [configs[i::procesos] for i in range(procesos)]
         tareas = [(i, t, claves, args.rutas, args.epocas,
-                   f"{log_path}.w{i}")
+                   f"{log_path}.w{i}", args.frac_datos, frac_modos)
                   for i, t in enumerate(trozos) if t]
         ctx = multiprocessing.get_context("spawn")
         with ProcessPoolExecutor(max_workers=len(tareas), mp_context=ctx) as ex:
@@ -732,6 +961,17 @@ def construir_parser():
                     help="peso de los modos raros (global/prioridades) en el "
                          "entrenamiento: 0 = sin ponderar, 1 = influencia "
                          "equilibrada entre modos, >1 = los raros dominan")
+    ap.add_argument("--frac-datos", dest="frac_datos", type=float, default=1.0,
+                    help="fracción del DATASET de entrenamiento a usar "
+                         "(0.35 = 35 %%). El recorte es estratificado por modo "
+                         "y por tamaño de flota, y los subconjuntos anidan "
+                         "(el 35 %% está dentro del 70 %%). La validación va "
+                         "siempre entera")
+    ap.add_argument("--frac-modos", dest="frac_modos", default=None,
+                    help="fracción distinta por tipo de escenario, p. ej. "
+                         "'global=1,prioridades=1,secuencial=0.3'. Lo que no "
+                         "se nombre usa --frac-datos. Etiquetas: secuencial, "
+                         "secuencial_rec, global, prioridades")
     ap.add_argument("--salida", default=MODELO_PT)
     ap.add_argument("--barrido", action="store_true",
                     help="prueba muchas configs y guarda la de mejor nota rollout")

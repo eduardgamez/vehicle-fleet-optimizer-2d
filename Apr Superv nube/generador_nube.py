@@ -33,6 +33,7 @@ Ejemplos:
 
 import argparse
 import collections
+import itertools
 import json
 import math
 import multiprocessing
@@ -116,7 +117,12 @@ def _leer_candidatos(ruta):
             except (ValueError, TypeError):
                 continue                       # línea a medias por un corte
             hechos.add((sem, modo, tuple(orden)))
-            clave = (fallos, coste, orden)
+            # tuple() OBLIGATORIO: json devuelve listas, pero los órdenes vivos
+            # (generar_ordenes) son tuplas. Si no se normaliza aquí, en cuanto
+            # una candidata viva empata en (fallos, coste) con una del
+            # checkpoint, el desempate compara tupla con lista y revienta:
+            # TypeError: '<' not supported between 'tuple' and 'list'.
+            clave = (fallos, coste, tuple(orden))
             k = (sem, modo)
             if k not in mejor or clave < mejor[k]:
                 mejor[k] = clave
@@ -135,38 +141,46 @@ def elegir_modo(semilla, opt, mezcla=MEZCLA):
     return random.Random(semilla * 2 + 1).choices(MODOS_OPT, weights=mezcla)[0]
 
 
-def modos_de_semilla(semilla, opt, mezcla, pares=0.5):
-    """Lista de modos a GENERAR para una semilla (uno o dos runs).
+# Fracción de las semillas SECUENCIALES que NO se generan: su plaza la cubre un
+# orden rescatado de un caso de global/grupos, que sale gratis porque ya estaba
+# calculado. Aquí está el ahorro de la técnica: no se paga por generar un
+# secuencial que ya tenemos de otra parte.
+#
+# Se descarta sorteando SOLO entre las que ya salieron secuenciales, en vez de
+# bajar el peso del secuencial en la mezcla. Es deliberado: la mezcla decide el
+# modo de CADA semilla, así que cambiarla reasignaría el modo de semillas ya
+# generadas y tiraría a la basura los casos de global/grupos ya pagados, que son
+# los caros. Así el modo de cada semilla no se mueve y lo hecho sigue valiendo.
+FRAC_SEC_DESCARTADAS = 0.4
 
-    Con opt != 'mixto': un único run en ese modo. Con 'mixto', la mezcla objetivo
-    (secuencial, global, prioridades) —a nivel de RUNS— se reparte por semilla con
-    un RNG propio (no altera la flota, igual que `elegir_modo`). Una fracción
-    'pares' de los global/prioridades se generan EMPAREJADOS: además del run en su
-    modo, un GEMELO en 'secuencial' de la MISMA situación, para que la red vea la
-    misma escena resuelta de las dos formas y aprenda a diferenciar el modo.
 
-    Los gemelos secuenciales CUENTAN dentro del secuencial: los pesos de rol se
-    derivan de la mezcla objetivo para que, contando los gemelos, la proporción de
-    runs siga siendo la de 'mezcla'. Ej.: mezcla (0.8, 0.1, 0.1) y pares=0.5 →
-    runs 80/10/10, con 5 % global y 5 % prioridades emparejados."""
+def modos_de_semilla(semilla, opt, mezcla):
+    """Modo a GENERAR para una semilla: un run por semilla, o NINGUNO si es una
+    secuencial de las descartadas (ver FRAC_SEC_DESCARTADAS).
+
+    Con opt != 'mixto': ese modo. Con 'mixto', la mezcla objetivo (secuencial,
+    global, prioridades) se reparte por semilla con un RNG propio (no altera la
+    flota, igual que `elegir_modo`).
+
+    Devuelve pares (modo, etiqueta) por compatibilidad con quien lo consume;
+    ahora ambos coinciden siempre.
+
+    HUBO un sistema de GEMELOS ('secuencial_par'): una fracción de los
+    global/prioridades se generaba también en secuencial con las mismas
+    condiciones iniciales, para que la red viera la misma escena resuelta de las
+    dos formas. Se ha desmantelado: los órdenes descartados que ahora se rescatan
+    de cada caso de prioridades (ver _tarea_candidato) ya aportan de sobra
+    situaciones secuenciales con condiciones iniciales de escenario
+    global/prioridades, y encima salen gratis, mientras que el gemelo costaba un
+    run entero. Los CSV de gemelos ya generados siguen siendo válidos y se
+    siguen leyendo al entrenar."""
     if opt != "mixto":
-        return [opt]
-    s, g, p = mezcla
-    # Pesos de rol POR SEMILLA: [sec_puro, glo_solo, pri_solo, glo_par, pri_par].
-    # Cada rol emparejado produce 2 runs (su modo + gemelo secuencial); resolver
-    # para que la mezcla de RUNS resultante sea (s, g, p) da estos pesos.
-    pesos = [max(0.0, s - pares * (g + p)),
-             (1.0 - pares) * g, (1.0 - pares) * p,
-             pares * g, pares * p]
-    roles = ("sec", "glo_solo", "pri_solo", "glo_par", "pri_par")
-    rol = random.Random(semilla * 2 + 1).choices(roles, weights=pesos)[0]
-    return {
-        "sec": ["secuencial"],
-        "glo_solo": ["global"],
-        "pri_solo": ["prioridades"],
-        "glo_par": ["global", "secuencial"],
-        "pri_par": ["prioridades", "secuencial"],
-    }[rol]
+        return [(opt, opt)]
+    modos = ("secuencial", "global", "prioridades")
+    m = random.Random(semilla * 2 + 1).choices(modos, weights=mezcla)[0]
+    if m == "secuencial" and random.Random(semilla * 5 + 11).random() < FRAC_SEC_DESCARTADAS:
+        return []            # esa plaza la cubre un orden rescatado, no se genera
+    return [(m, m)]
 
 
 def sortear_preferencias(n):
@@ -214,6 +228,53 @@ def construir_escenario(semilla, tamanos, modo, env):
         e["grupo"], e["prioridad"] = g, p
     normal = parsear_especificaciones(repr(especs))
     return modo, [espec_a_vehiculo(e, i, env) for i, e in enumerate(normal)]
+
+
+# Cuántos órdenes descartados se rescatan como secuenciales POR ESCENARIO.
+# Varios salen a cuenta: ya están calculados y son gratis. El precio es que dos
+# órdenes rescatados del mismo escenario comparten condiciones iniciales, así
+# que en el PRIMER instante presentan a la red las mismas entradas con objetivos
+# distintos. A partir de ahí las trayectorias divergen y el conflicto
+# desaparece, o sea que afecta a una fracción pequeña de las muestras de cada
+# run; y las alternativas en conflicto son simétricas entre sí (solo cambia el
+# desempate entre vehículos de igual grupo y prioridad). Con todo, no conviene
+# subirlo mucho: cuantos más se saquen del mismo sitio, menos variedad de
+# situaciones por euro.
+RESCATES_POR_ESC = 3
+
+# Base de semillas para los GEMELOS (ver --gemelos). Muy por encima de cualquier
+# rango de trabajo real, para que un gemelo no coincida nunca con un escenario
+# del dataset ni se pise con otra tanda.
+BASE_GEMELOS = 50_000_000
+
+
+def reetiquetar_para_orden(vehiculos, orden):
+    """Reescribe grupo y prioridad de la flota para que ordenar por (grupo,
+    prioridad) dé EXACTAMENTE 'orden'. Modifica los vehículos en el sitio.
+
+    Es lo que permite reaprovechar CUALQUIER orden descartado como run
+    secuencial, incluidos los de modo 'global'. El problema que resuelve: la red
+    recibe, por cada vecino, un signo de preferencia deducido de (grupo,
+    prioridad). Un orden global puede adelantar a un vehículo de prioridad baja;
+    guardado tal cual como secuencial, le estaría enseñando a la red a ignorar
+    la preferencia justo en el modo que existe para respetarla. En vez de tirar
+    ese orden, se cambian las etiquetas para que la situación SEA de verdad la
+    que produce ese orden. Las trayectorias ya calculadas siguen siendo las
+    correctas, porque planificar en secuencial esta flota reetiquetada da ese
+    mismo orden.
+
+    Se REPARTEN las etiquetas que ya tenía la flota (ordenadas) a lo largo de
+    'orden', en vez de inventar una prioridad distinta por vehículo. Así la
+    forma de la jerarquía —cuántos niveles hay y de qué tamaño— sigue siendo la
+    que sortea `sortear_preferencias`, y los runs rescatados no se sesgan hacia
+    flotas totalmente jerarquizadas. El precio es que, cuando hay empates, los
+    vehículos empatados quedan interchangeables: ahí el orden guardado y el que
+    daría una planificación secuencial pueden diferir. Es el caso benigno (son
+    equivalentes por definición) y es el mismo que ya se acepta al rescatar
+    varios órdenes del mismo escenario."""
+    claves = sorted((v.grupo, v.prioridad) for v in vehiculos)
+    for pos, i in enumerate(orden):
+        vehiculos[i].grupo, vehiculos[i].prioridad = claves[pos]
 
 
 def ordenes_a_explorar(vehiculos, modo, fraccion, curvatura, tope):
@@ -349,16 +410,84 @@ def _iniciar(ruta_mapa, calidad):
 
 
 def _tarea_candidato(t):
-    """Evalúa UN orden candidato. Su ruta se descarta: solo interesa cómo de
-    bueno sale el orden, para poder elegir."""
-    semilla, tamanos, modo, orden = t
+    """Evalúa UN orden candidato. Normalmente su ruta se descarta: solo interesa
+    cómo de bueno sale el orden, para poder elegir.
+
+    Si 'rescatar' viene a True, la ruta NO se tira: se devuelve además como un
+    run de entrenamiento etiquetado 'secuencial_rec'. La idea es que un orden
+    descartado ya es, de hecho, una flota resuelta planificando de uno en uno —
+    justo lo que la red ve como "secuencial"— y ya está calculada, así que
+    tirarla es regalar datos. Sirve CUALQUIER orden y de cualquier modo: los
+    grupos y prioridades que se guardan se reescriben para que encajen con el
+    orden planificado (ver reetiquetar_para_orden)."""
+    semilla, tamanos, modo, orden, rescatar = t
+    t0 = time.perf_counter()
     _, vehiculos = construir_escenario(semilla, tamanos, modo, _ENV)
     _PL.deadline = None
     _PL.max_exp = _CAP_CALIDAD
     trays, _, coste = planificar_orden(_PL, vehiculos, orden, Reservas(),
                                        deadline_dur=None)
     fallos = sum(1 for i in orden if trays[i] is None)
-    return semilla, modo, orden, fallos, coste
+
+    # Los que se quedaron sin ruta se reintentan con el techo alto, igual que
+    # haría la pasada definitiva, para que lo que se guarde no esté por debajo
+    # del estándar del resto. Solo hace falta si estas rutas se van a guardar.
+    if fallos and rescatar:
+        _PL.max_exp = CAP_COMPLETO
+        reservas = Reservas()
+        for i in orden:
+            if trays[i] is not None:
+                v = vehiculos[i]
+                reservas.add(trays[i], v.length, v.width)
+        for i in orden:
+            if trays[i] is not None:
+                continue
+            veh = vehiculos[i]
+            _PL.bloqueos = bloqueos_metas(vehiculos, orden, excepto=i,
+                                          pose0=veh.inicio)
+            traj = _PL.planificar(veh, reservas)
+            if traj is not None and len(traj) >= 2:
+                trays[i] = traj
+                reservas.add(traj, veh.length, veh.width)
+        _PL.max_exp = _CAP_CALIDAD
+
+    # Las FILAS se construyen UNA sola vez y se comparten entre los dos usos: son
+    # las mismas trayectorias, lo único que cambia entre un uso y otro son las
+    # condiciones iniciales que las acompañan (el rescatado las lleva
+    # reetiquetadas). Construirlas dos veces era trabajo tirado.
+    definitiva = rescate = None
+    if not fallos or rescatar:
+        for i, veh in enumerate(vehiculos):
+            traj = trays.get(i)
+            veh.traj = traj if traj is not None else []
+            veh.mision_ok = traj is not None
+            veh.dt_plan = DT
+        ok = [v for v in vehiculos if v.mision_ok and v.traj]
+        filas = []
+        for veh in ok:
+            filas.extend(muestras_supervisadas(veh))
+        if filas:
+            # Si NINGÚN vehículo se quedó sin ruta, estas trayectorias son ya
+            # las definitivas: replanificar el orden con `planificar_definitivo`
+            # daría exactamente lo mismo. El techo más alto de esa pasada no
+            # cambia nada porque la búsqueda termina mucho antes, por
+            # estancamiento; medido, tarda lo mismo y devuelve rutas idénticas.
+            # Así que si este orden acaba ganando, el padre las guarda sin
+            # volver a planificar. Con fallos no se devuelven: ahí la pasada
+            # definitiva sí aporta (reubica y reintenta a los que no llegaron).
+            if not fallos:
+                definitiva = (len(vehiculos), len(ok),
+                              [veh_a_dict(v) for v in ok], filas,
+                              time.perf_counter() - t0)
+            if rescatar:
+                # Se reetiqueta ANTES de volcar las condiciones del rescatado:
+                # lo que se guarda tiene que ser la flota cuyo orden secuencial
+                # es justo el que se planificó. Las de 'definitiva' ya están
+                # tomadas arriba, con las etiquetas originales.
+                reetiquetar_para_orden(vehiculos, orden)
+                rescate = (len(vehiculos), len(ok),
+                           [veh_a_dict(v) for v in ok], filas)
+    return semilla, modo, orden, fallos, coste, rescate, definitiva
 
 
 def _tarea_definitiva(t):
@@ -388,18 +517,61 @@ def generar(mias, args, tamanos, mezcla, idt):
     prog_path = os.path.join(args.salida, f"progreso_t{idt:03d}.txt")
     cand_path = os.path.join(args.salida, f"candidatos_t{idt:03d}.jsonl")
     hechas = _leer_progreso(prog_path)          # claves "semilla:modo"
-    # Cada semilla produce uno o dos runs (ver modos_de_semilla); la unidad de
-    # trabajo y de reanudación es (semilla, modo). Una semilla emparejada aporta
-    # su modo (global/prioridades) y un gemelo 'secuencial' de la misma flota.
-    pendientes = [(sem, modo)
-                  for sem in mias
-                  for modo in modos_de_semilla(sem, args.opt, mezcla)
-                  if f"{sem}:{modo}" not in hechas]
+    # Cada semilla produce un run (ver modos_de_semilla); la unidad de
+    # trabajo y de reanudación es (semilla, modo). 'etiqueta_de' es la etiqueta
+    # con la que se GUARDA (hoy siempre igual al modo; se mantiene el mecanismo
+    # porque los CSV ya generados con gemelos 'secuencial_par' siguen leyéndose).
+    etiqueta_de = {}
+    pendientes = []
+    for sem in mias:
+        for modo, etiqueta in modos_de_semilla(sem, args.opt, mezcla):
+            etiqueta_de[(sem, modo)] = etiqueta
+            if f"{sem}:{modo}" not in hechas:
+                pendientes.append((sem, modo))
     if hechas:
         print(f"[gen] reanudando: {len(hechas)} hechas, "
               f"{len(pendientes)} pendientes", flush=True)
     if not pendientes:
         return 0, 0, 0, 0
+
+    # GEMELOS: por cada unidad pendiente se preparan N escenarios EQUIVALENTES
+    # (mismo nº de vehículos, mismo modo, misma calidad) pero con condiciones
+    # iniciales distintas, sacados de semillas fuera del rango del trabajo. Los
+    # dos compiten por la misma PLAZA y se queda la que termine primero; el resto
+    # se descarta al vuelo.
+    #
+    # Para qué: al final quedan unos pocos escenarios patológicamente lentos que
+    # acaparan un núcleo cada uno durante horas mientras el resto de la máquina
+    # está parada. Como las condiciones iniciales son aleatorias de todos modos,
+    # cambiar una situación imposible por otra equivalente no cambia en nada la
+    # composición del dataset — mismo tamaño de flota y mismo modo— y evita
+    # esperar indefinidamente. Los gemelos se exploran igual que cualquier otro
+    # escenario (sus candidatas completas), así que no se rebaja la calidad.
+    slot_de = {k: k for k in pendientes}       # unidad -> plaza que ocupa
+    plazas_llenas = set()                      # plazas que ya tienen ganador
+    gemelos_de = collections.Counter()         # intentos lanzados por plaza
+    usadas_g = {s for s, _ in pendientes} | {int(k.split(":")[0])
+                                             for k in hechas if ":" in k}
+    if args.gemelos:
+        for sem, modo in list(pendientes):
+            _, vehs = construir_escenario(sem, tamanos, modo, env)
+            if vehs is None:
+                continue
+            n_obj, s_alt, puestos = len(vehs), BASE_GEMELOS + sem * 1000, 0
+            while puestos < args.gemelos and s_alt < BASE_GEMELOS + sem * 1000 + 5000:
+                if s_alt not in usadas_g:
+                    _, v2 = construir_escenario(s_alt, tamanos, modo, env)
+                    if v2 is not None and len(v2) == n_obj:
+                        pendientes.append((s_alt, modo))
+                        etiqueta_de[(s_alt, modo)] = modo
+                        slot_de[(s_alt, modo)] = (sem, modo)
+                        usadas_g.add(s_alt)
+                        gemelos_de[(sem, modo)] += 1
+                        puestos += 1
+                s_alt += 1
+        print(f"[gen] {len(pendientes)} unidades en total "
+              f"({args.gemelos} gemelos iniciales por plaza; se reponen solos "
+              f"según se liberen núcleos)", flush=True)
 
     n_workers = max(1, min(args.workers, os.cpu_count() or 1))
     ctx = multiprocessing.get_context("spawn")
@@ -415,11 +587,77 @@ def generar(mias, args, tamanos, mezcla, idt):
     hechos_cand, mejor = _leer_candidatos(cand_path)
     info = {}                              # (sem,modo) -> candidatas que faltan
     listos_def = collections.deque()       # unidades listas para planificar a tope
+    mejor_def = {}                         # (sem,modo) -> rutas del mejor hasta ahora
+    ahorradas = 0                          # planificaciones definitivas evitadas
 
-    def fuente_trabajo():
-        """Va emitiendo trabajo unidad a unidad (perezoso, para no construir de
-        golpe las flotas y órdenes de las 10 000): 'saltado', 'cand' o 'def'."""
-        for sem, modo in pendientes:
+    # Varios escenarios se mantienen ABIERTOS a la vez (hasta PROFUNDIDAD) y sus
+    # candidatas se intercalan por turnos (round-robin): así un escenario caro
+    # (p. ej. un global de 8 vehículos, con cientos de órdenes) NUNCA acapara la
+    # ventana entera él solo, que era lo que volvía a bloquear a los baratos que
+    # iban detrás pese al planificador continuo.
+    PROFUNDIDAD = max(8, n_workers)
+    # Tope de definitivas encoladas por adelantado. Sin él, 'asegurar_abiertos'
+    # vaciaba el preparador ENTERO en cada arranque: la mayoría de unidades son
+    # secuenciales (van a 'listos_def' y NO cuentan para PROFUNDIDAD), así que
+    # el bucle seguía pidiendo hasta encontrar 32 escenarios con candidatas,
+    # construyendo de golpe miles de escenarios que no tocaban aún.
+    TOPE_DEF = 2 * n_workers
+    abiertos = []                          # [(sem, modo, cola_de_órdenes_restantes)]
+    # Candidatas ya evaluadas de cada escenario, arrastrando las del checkpoint:
+    # al reanudar, el que ya iba adelantado NO debe volver a ir primero.
+    hechas_de = collections.Counter((s, m) for s, m, _ in hechos_cand)
+    prep_agotada = False
+    rescatada = {}                         # (sem,modo) -> órdenes a guardar como sec.
+
+    def mas_gemelos():
+        """Va soltando gemelos NUEVOS para las plazas que sigan sin ganador,
+        empezando por la que menos intentos lleve.
+
+        Sin esto, los gemelos se creaban todos de golpe al principio: en cuanto
+        una plaza se resolvía, sus competidores se descartaban y esos núcleos se
+        quedaban parados hasta el final. Ahora, cada hueco que se libera se
+        rellena con un intento nuevo de las plazas que aún resisten, así que la
+        máquina no deja de empujar donde hace falta."""
+        while True:
+            libres = [p for p in slot_de.values() if p not in plazas_llenas]
+            if not libres:
+                return
+            plaza = min(set(libres), key=lambda p: gemelos_de[p])
+            sem0, modo = plaza
+            _, vehs = construir_escenario(sem0, tamanos, modo, env)
+            if vehs is None:
+                plazas_llenas.add(plaza)          # no hay flota que valga: fuera
+                continue
+            n_obj = len(vehs)
+            s_alt = BASE_GEMELOS + sem0 * 1000 + gemelos_de[plaza] + 1
+            tope = BASE_GEMELOS + sem0 * 1000 + 5000
+            puesto = None
+            while s_alt < tope:
+                if s_alt not in usadas_g:
+                    _, v2 = construir_escenario(s_alt, tamanos, modo, env)
+                    if v2 is not None and len(v2) == n_obj:
+                        puesto = s_alt
+                        break
+                s_alt += 1
+            gemelos_de[plaza] += 1
+            if puesto is None:
+                plazas_llenas.add(plaza)          # agotadas las semillas: fuera
+                continue
+            usadas_g.add(puesto)
+            slot_de[(puesto, modo)] = plaza
+            etiqueta_de[(puesto, modo)] = modo
+            print(f"[gen] gemelo nuevo sem={puesto} para la plaza "
+                  f"{sem0}:{modo} (intento {gemelos_de[plaza]})", flush=True)
+            yield (puesto, modo)
+
+    def preparador():
+        unidades = itertools.chain(pendientes,
+                                   mas_gemelos() if args.gemelos else ())
+        for i_prep, (sem, modo) in enumerate(unidades):
+            if slot_de.get((sem, modo), (sem, modo)) in plazas_llenas:
+                continue                     # su plaza ya tiene ganador
+            print(f"[gen] preparando #{i_prep} sem={sem} modo={modo}",
+                  flush=True)
             _, vehiculos = construir_escenario(sem, tamanos, modo, env)
             if vehiculos is None:                     # la flota no cabía
                 yield ("saltado", sem, modo, None)
@@ -428,56 +666,168 @@ def generar(mias, args, tamanos, mezcla, idt):
             max_cand = ordenes_a_explorar(vehiculos, modo, args.fraccion_ordenes,
                                           args.curvatura_ordenes, args.tope_ordenes)
             ordenes = generar_ordenes(vehiculos, list(range(n)), modo, max_cand)
+            print(f"[gen]   #{i_prep} {n} veh. · {len(ordenes) if ordenes else 0} "
+                  f"órdenes", flush=True)
             k = (sem, modo)
             if ordenes and len(ordenes) > 1:
+                # Una sola orden RESCATADA por escenario (ver _tarea_candidato),
+                # elegida entre las que respetan grupo y prioridad. Se sortea de
+                # forma determinista a partir de la semilla, no se coge la
+                # primera ni la mejor: así los runs recuperados vienen de sitios
+                # distintos y uniformes en vez de sesgarse hacia un tipo de
+                # orden. Una sola por escenario evita además guardar dos
+                # versiones del MISMO escenario, que se contradirían entre sí.
+                rnd = random.Random(sem * 3 + 7)
+                rescatada[k] = {tuple(o) for o in
+                                rnd.sample(ordenes,
+                                           min(RESCATES_POR_ESC, len(ordenes)))}
                 rest = [o for o in ordenes
                         if (sem, modo, tuple(o)) not in hechos_cand]
-                if rest:
+                if rest and not args.cerrar_parciales:
                     info[k] = {"faltan": len(rest), "por_defecto": ordenes[0]}
-                    for o in rest:
-                        yield ("cand", sem, modo, o)
-                else:                                 # ya todo en el checkpoint
+                    yield ("abrir", sem, modo, collections.deque(rest))
+                else:
+                    # Ya está todo explorado, o se está CERRANDO EN FALSO: en ese
+                    # segundo caso el escenario se cierra con la mejor candidata
+                    # que haya en el checkpoint, sin evaluar las que faltaban.
+                    # Sirve para cuando se acaba el presupuesto: sin esto, un
+                    # escenario a medio explorar no escribe NADA y todo su
+                    # cómputo se tira (el 2026-08-05 eran 714 candidatas ya
+                    # pagadas repartidas en 27 escenarios).
                     orden = mejor[k][2] if k in mejor else ordenes[0]
                     yield ("def", sem, modo, orden)
             else:                                     # secuencial / 1 orden: directo
-                yield ("def", sem, modo, ordenes[0] if ordenes else list(range(n)))
+                yield ("def", sem, modo,
+                       ordenes[0] if ordenes else list(range(n)))
 
-    ventana = 2 * n_workers
-    fuente = fuente_trabajo()
-    agotada = False
-    futs = {}
+    prep = preparador()
 
     with ProcessPoolExecutor(max_workers=n_workers, mp_context=ctx,
                              initializer=_iniciar,
                              initargs=(args.mapa, args.calidad)) as ex, \
             open(prog_path, "a", encoding="utf-8") as fprog, \
             open(cand_path, "a", encoding="utf-8") as fcand:
-        while True:
-            # 1) rellenar la ventana: primero las definitivas listas (para ir
-            #    escribiendo cuanto antes), luego más trabajo de la fuente.
-            while len(futs) < ventana:
-                if listos_def:
-                    sem, modo, orden = listos_def.popleft()
-                    f = ex.submit(_tarea_definitiva, (sem, tamanos, modo, orden))
-                    futs[f] = ("def", sem, modo)
-                    continue
-                if agotada:
-                    break
+
+        def asegurar_abiertos():
+            """Abre escenarios nuevos hasta tener PROFUNDIDAD a la vez (o hasta
+            agotar el trabajo), para que siempre haya varios entre los que
+            rotar."""
+            nonlocal prep_agotada, saltados
+            while (len(abiertos) < PROFUNDIDAD and len(listos_def) < TOPE_DEF
+                   and not prep_agotada):
                 try:
-                    tipo, sem, modo, orden = next(fuente)
+                    tipo, sem, modo, extra = next(prep)
                 except StopIteration:
-                    agotada = True
+                    prep_agotada = True
                     break
                 if tipo == "saltado":
                     saltados += 1
                     fprog.write(f"{sem}:{modo}\n")
                     fprog.flush()
-                elif tipo == "cand":
-                    f = ex.submit(_tarea_candidato, (sem, tamanos, modo, orden))
-                    futs[f] = ("cand", sem, modo)
-                else:
+                elif tipo == "abrir":
+                    abiertos.append((sem, modo, extra))
+                else:                                  # "def"
+                    listos_def.append((sem, modo, extra))
+
+        def siguiente_candidata():
+            """Una candidata del escenario abierto MENOS avanzado, o None si no
+            queda ninguno.
+
+            Se elige por mínimo de candidatas evaluadas, no por rotación simple.
+            La rotación reparte los turnos por igual a partir del momento en que
+            cada escenario se abre, pero los que entran tarde (al reponer hueco,
+            o tras un reinicio) arrastran la desventaja para siempre. Medido el
+            2026-08-05: entre los pendientes había uno con 120 candidatas hechas
+            y siete con 1. Repartir por el que menos lleva los iguala, que es lo
+            que hace falta si el presupuesto puede cortar a media exploración:
+            así todos quedan explorados a una profundidad parecida y ninguno sale
+            favorecido."""
+            asegurar_abiertos()
+            if not abiertos:
+                return None
+            i_min = min(range(len(abiertos)), key=lambda i: hechas_de[abiertos[i][0],
+                                                                     abiertos[i][1]])
+            sem, modo, cola = abiertos[i_min]
+            orden = cola.popleft()
+            hechas_de[(sem, modo)] += 1
+            if not cola:
+                del abiertos[i_min]                    # agotado: sale de la rueda
+            return (sem, modo, orden)
+
+        def anotar_definitiva(s, m, n, n_ok, condiciones, filas, dur):
+            """Guarda un escenario resuelto y lleva la cuenta. Se llama tanto con
+            el resultado de `_tarea_definitiva` como con las rutas que ya venían
+            de la candidata ganadora (ver `mejor_def`), porque en ambos casos lo
+            que hay que hacer es exactamente lo mismo."""
+            nonlocal filas_tot, veh_ok, veh_tot, hechos
+            plaza = slot_de.get((s, m), (s, m))
+            if plaza in plazas_llenas:
+                return                       # otro gemelo llegó antes: se tira
+            plazas_llenas.add(plaza)
+            if filas:
+                # La etiqueta (no el modo de planificación) es lo que se guarda:
+                # distingue 'secuencial_par' de la secuencial pura, para poder
+                # darles peso distinto al entrenar.
+                etq = etiqueta_de.get((s, m), m)
+                ruta_csv = os.path.join(
+                    args.salida, f"nveh_{n:02d}",
+                    f"rutas_c{args.calidad}_{etq}_t{idt:03d}.csv")
+                filas_tot += escribir_run(ruta_csv, s, etq, condiciones, filas)
+            # El progreso se anota DESPUÉS de que el escenario esté en disco. Se
+            # anota la PLAZA, no la unidad: si ganó un gemelo, lo que queda por
+            # hecho es el escenario original, que es el que no hay que repetir.
+            fprog.write(f"{plaza[0]}:{plaza[1]}\n")
+            if plaza != (s, m):
+                fprog.write(f"{s}:{m}\n")
+            fprog.flush()
+            veh_ok += n_ok
+            veh_tot += n
+            hechos += 1
+            if hechos % args.cada == 0:
+                t = time.perf_counter() - t_ini
+                print(f"[gen] {hechos}/{len(pendientes)} · último: {n} "
+                      f"veh. {m} {dur:.0f} s · {filas_tot:,} filas · "
+                      f"{veh_ok}/{veh_tot} con ruta · media "
+                      f"{t / hechos:.0f} s/run", flush=True)
+
+        ventana = 2 * n_workers
+        futs = {}
+        while True:
+            # 1) rellenar la ventana: en CADA vuelta se intentan las DOS cosas
+            #    (una definitiva lista, si hay, y una candidata intercalada), en
+            #    vez de agotar antes todas las definitivas. Con solo definitivas
+            #    primero, mientras hubiera trabajo rápido en cola (lo habitual)
+            #    nunca se llegaba a pedir una candidata nueva, y las lentas se
+            #    quedaban paradas ratos largos en vez de avanzar poco a poco.
+            while len(futs) < ventana:
+                avanzo = False
+                if listos_def:
+                    sem, modo, orden = listos_def.popleft()
+                    if slot_de.get((sem, modo), (sem, modo)) in plazas_llenas:
+                        continue             # su plaza ya la ganó otro gemelo
                     f = ex.submit(_tarea_definitiva, (sem, tamanos, modo, orden))
                     futs[f] = ("def", sem, modo)
+                    avanzo = True
+                if len(futs) < ventana:
+                    item = siguiente_candidata()
+                    if item is not None:
+                        sem, modo, orden = item
+                        resc = tuple(orden) in rescatada.get((sem, modo), ())
+                        f = ex.submit(_tarea_candidato,
+                                      (sem, tamanos, modo, orden, resc))
+                        futs[f] = ("cand", sem, modo)
+                        avanzo = True
+                if not avanzo:
+                    if listos_def:
+                        # 'siguiente_candidata' llama a 'asegurar_abiertos', que
+                        # puede haber llenado la cola de definitivas DESPUÉS de
+                        # que la mirásemos arriba. Sin este continue se salía del
+                        # bucle con trabajo recién encolado y, al estar 'futs'
+                        # vacío, se daba por terminado todo. Pasaba siempre con
+                        # --cerrar-parciales, donde NINGÚN escenario se abre para
+                        # explorar y por tanto todo va a parar a esta cola.
+                        continue
+                    break                              # nada más por ahora
 
             if not futs:
                 break                                 # no queda nada por hacer
@@ -486,7 +836,23 @@ def generar(mias, args, tamanos, mezcla, idt):
             for f in wait(futs, return_when=FIRST_COMPLETED).done:
                 tipo, sem, modo = futs.pop(f)
                 if tipo == "cand":
-                    s, m, orden, fallos, coste = f.result()
+                    s, m, orden, fallos, coste, rescate, definitiva = f.result()
+                    if rescate is not None:
+                        # Orden descartado que se aprovecha como run secuencial:
+                        # su ruta ya estaba calculada, así que sale gratis. Va
+                        # con etiqueta propia para poder capar su proporción al
+                        # entrenar, pero la red lo verá como 'secuencial'.
+                        # Los varios rescates de un mismo escenario comparten
+                        # run_id (la semilla) A PROPÓSITO: al entrenar, el
+                        # reparto train/validación es por clave de run, así que
+                        # así caen todos del mismo lado y no se valida con una
+                        # variante del escenario que ya se ha entrenado.
+                        n_r, ok_r, cond_r, filas_r = rescate
+                        ruta_csv = os.path.join(
+                            args.salida, f"nveh_{n_r:02d}",
+                            f"rutas_c{args.calidad}_secuencial_rec_t{idt:03d}.csv")
+                        filas_tot += escribir_run(ruta_csv, s, "secuencial_rec",
+                                                  cond_r, filas_r)
                     # Se anota en el acto: si cae la máquina, no se repite.
                     fcand.write(json.dumps([s, m, orden, fallos, coste]) + "\n")
                     fcand.flush()
@@ -494,36 +860,28 @@ def generar(mias, args, tamanos, mezcla, idt):
                     clave = (fallos, coste, orden)     # desempate por el orden
                     if k not in mejor or clave < mejor[k]:
                         mejor[k] = clave
+                        # Se guardan las rutas del mejor HASTA AHORA y se suelta
+                        # las del anterior: así, como mucho, se retiene un
+                        # escenario por cada uno de los abiertos.
+                        mejor_def[k] = definitiva
                     info[k]["faltan"] -= 1
                     if info[k]["faltan"] == 0:          # ya se puede elegir ganador
                         gana = mejor[k][2] if k in mejor else info[k]["por_defecto"]
-                        listos_def.append((s, m, gana))
+                        lista = mejor_def.pop(k, None)
+                        if lista is not None:
+                            # El ganador ya venía planificado sin fallos: sus
+                            # rutas son las definitivas y no hay que repetir la
+                            # planificación entera (ver _tarea_candidato).
+                            ahorradas += 1
+                            anotar_definitiva(s, m, *lista)
+                        else:
+                            listos_def.append((s, m, gana))
                         del info[k]
                 else:
-                    s, m, n, n_ok, condiciones, filas, dur = f.result()
-                    if filas:
-                        ruta_csv = os.path.join(
-                            args.salida, f"nveh_{n:02d}",
-                            f"rutas_c{args.calidad}_{m}_t{idt:03d}.csv")
-                        filas_tot += escribir_run(ruta_csv, s, m, condiciones,
-                                                  filas)
-                    # El progreso se anota DESPUÉS de que el escenario esté en disco.
-                    fprog.write(f"{s}:{m}\n")
-                    fprog.flush()
-                    veh_ok += n_ok
-                    veh_tot += n
-                    hechos += 1
-                    if hechos % args.cada == 0:
-                        t = time.perf_counter() - t_ini
-                        print(f"[gen] {hechos}/{len(pendientes)} · último: {n} "
-                              f"veh. {m} {dur:.0f} s · {filas_tot:,} filas · "
-                              f"{veh_ok}/{veh_tot} con ruta · media "
-                              f"{t / hechos:.0f} s/run", flush=True)
-
-            # Tanda completa y volcada a disco: su checkpoint de candidatos ya
-            # no hace falta. Se vacía para que el fichero no crezca y para
-            # empezar limpia la siguiente tanda.
-            open(cand_path, "w", encoding="utf-8").close()
+                    anotar_definitiva(*f.result())
+    if ahorradas:
+        print(f"[gen] {ahorradas} planificaciones definitivas evitadas "
+              f"(el ganador ya venía resuelto de la comparación)", flush=True)
     return filas_tot, veh_ok, veh_tot, saltados
 
 
@@ -575,6 +933,18 @@ def main():
                          "se estabiliza antes (def. 1.5)")
     ap.add_argument("--tope-ordenes", dest="tope_ordenes", type=int, default=400,
                     help="tope duro de órdenes por escenario (def. 400)")
+    ap.add_argument("--gemelos", type=int, default=0,
+                    help="escenarios EQUIVALENTES (mismo nº de vehículos y "
+                         "modo, condiciones distintas) que compiten por cada "
+                         "plaza pendiente; se queda el primero que termine. "
+                         "Sirve para no dejar núcleos parados esperando a un "
+                         "escenario patológicamente lento (def. 0)")
+    ap.add_argument("--cerrar-parciales", dest="cerrar_parciales",
+                    action="store_true",
+                    help="no evalúa candidatas nuevas: cierra cada escenario a "
+                         "medio explorar con la mejor que ya tenga en el "
+                         "checkpoint. Para rematar cuando se acaba el "
+                         "presupuesto, en vez de perder lo ya calculado")
     ap.add_argument("--mezcla", default=",".join(str(p) for p in MEZCLA),
                     help="reparto de escenarios entre secuencial, global y "
                          f"prioridades (def. {MEZCLA})")

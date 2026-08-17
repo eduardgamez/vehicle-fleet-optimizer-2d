@@ -322,6 +322,117 @@ def entradas_instante(est, par, idx_otros, valido, ctx, n_vec_max, hor_max,
 
 
 # --------------------------------------------------------------------------- #
+# Colisiones (vectorizadas)
+# --------------------------------------------------------------------------- #
+# La puntuación premia llegar y el ángulo final. Sin comprobar choques, una red
+# que atraviese a otro vehículo o se meta por encima de un obstáculo saca la
+# misma nota que una que conduzca limpio, y estamos eligiendo la ganadora entre
+# miles de candidatas con esa vara de medir. Estas funciones son la versión
+# vectorizada del mismo criterio (SAT sobre rectángulos orientados) que usa el
+# planificador clásico en `nucleo`.
+
+def esquinas(x, y, th, largo, ancho):
+    """(N, 4, 2) con las esquinas de cada rectángulo orientado."""
+    c, s = np.cos(th), np.sin(th)
+    hl, hw = 0.5 * largo, 0.5 * ancho
+    dx = np.stack([hl * c - hw * s, hl * c + hw * s,
+                   -hl * c + hw * s, -hl * c - hw * s], axis=1)
+    dy = np.stack([hl * s + hw * c, hl * s - hw * c,
+                   -hl * s - hw * c, -hl * s + hw * c], axis=1)
+    return np.stack([x[:, None] + dx, y[:, None] + dy], axis=2)
+
+
+def ejes(c):
+    """(N, 4, 2) con las normales de los lados, que son los ejes del SAT."""
+    d = np.roll(c, -1, axis=1) - c
+    n = np.stack([-d[:, :, 1], d[:, :, 0]], axis=2)
+    ln = np.hypot(n[:, :, 0], n[:, :, 1])
+    # Un eje degenerado se deja a cero: proyecta 0 en ambos y nunca separa, que
+    # es justo lo que hace el núcleo clásico.
+    return np.where(ln[:, :, None] > 1e-12, n / np.maximum(ln, 1e-12)[:, :, None],
+                    0.0)
+
+
+def solapan(cA, cB):
+    """(N,) booleano: ¿se solapan los rectángulos A y B de cada pareja?"""
+    if len(cA) == 0:
+        return np.zeros(0, dtype=bool)
+    ej = np.concatenate([ejes(cA), ejes(cB)], axis=1)          # (N, 8, 2)
+    pa = np.einsum("nij,nkj->nik", ej, cA)                     # (N, 8, 4)
+    pb = np.einsum("nij,nkj->nik", ej, cB)
+    separa = (pa.max(2) < pb.min(2)) | (pb.max(2) < pa.min(2))
+    return ~separa.any(axis=1)
+
+
+def choques_entre_vehiculos(est, par, idx_otros, valido, mirar=None):
+    """(M,) booleano: qué vehículos están tocando a un compañero de flota.
+
+    Primero se descarta por círculos envolventes (barato) y solo las parejas que
+    sobreviven pasan por el SAT, que es lo caro.
+
+    'mirar' limita la comprobación a unos vehículos. Se usa para dejar fuera a
+    los que YA han chocado: una vez marcados no hace falta volver a mirarlos, y
+    como una red mala choca casi entera en los primeros metros, sin este filtro
+    el simulador se pasa el resto de la simulación recomprobando lo mismo (era
+    diez veces más lento)."""
+    M, K = idx_otros.shape
+    if M == 0 or K == 0:
+        return np.zeros(M, dtype=bool)
+    radio = 0.5 * np.hypot(par["largo"], par["ancho"])
+    x, y = est[:, 0], est[:, 1]
+    dx = x[idx_otros] - x[:, None]
+    dy = y[idx_otros] - y[:, None]
+    cerca = valido & ((dx * dx + dy * dy)
+                      <= (radio[:, None] + radio[idx_otros]) ** 2)
+    if mirar is not None:
+        cerca &= mirar[:, None]
+    fi, fj = np.nonzero(cerca)
+    if len(fi) == 0:
+        return np.zeros(M, dtype=bool)
+    oj = idx_otros[fi, fj]
+    cA = esquinas(x[fi], y[fi], est[fi, 2], par["largo"][fi], par["ancho"][fi])
+    cB = esquinas(x[oj], y[oj], est[oj, 2], par["largo"][oj], par["ancho"][oj])
+    golpe = solapan(cA, cB)
+    out = np.zeros(M, dtype=bool)
+    np.logical_or.at(out, fi[golpe], True)
+    np.logical_or.at(out, oj[golpe], True)
+    return out
+
+
+def choques_con_mapa(est, par, obstaculos, mundo, mirar=None):
+    """(M,) booleano: qué vehículos tocan un obstáculo fijo o se salen del mundo.
+
+    'mirar' limita la comprobación a unos vehículos (ver
+    `choques_entre_vehiculos`)."""
+    M = len(est)
+    salida = np.zeros(M, dtype=bool)
+    if M == 0:
+        return salida
+    idx = np.arange(M) if mirar is None else np.flatnonzero(mirar)
+    if len(idx) == 0:
+        return salida
+    x, y, th = est[idx, 0], est[idx, 1], est[idx, 2]
+    largo, ancho = par["largo"][idx], par["ancho"][idx]
+    cA = esquinas(x, y, th, largo, ancho)
+    ancho_mundo, alto_mundo = mundo
+    tocado = ((cA[:, :, 0] < 0.0) | (cA[:, :, 0] > ancho_mundo)
+              | (cA[:, :, 1] < 0.0) | (cA[:, :, 1] > alto_mundo)).any(axis=1)
+    if obstaculos is not None:
+        oc, obb = obstaculos        # esquinas (K,4,2) y círculo (K,3)
+        if len(oc):
+            radio = 0.5 * np.hypot(largo, ancho)
+            dx = obb[None, :, 0] - x[:, None]
+            dy = obb[None, :, 1] - y[:, None]
+            cerca = (dx * dx + dy * dy) <= (radio[:, None] + obb[None, :, 2]) ** 2
+            fi, fk = np.nonzero(cerca)
+            if len(fi):
+                golpe = solapan(cA[fi], oc[fk])
+                np.logical_or.at(tocado, fi[golpe], True)
+    salida[idx] = tocado
+    return salida
+
+
+# --------------------------------------------------------------------------- #
 # Rollout en bucle cerrado VECTORIZADO
 # --------------------------------------------------------------------------- #
 # Es la misma simulacion que politica.rollout_multiflota, con todas las flotas y
@@ -380,12 +491,27 @@ def _preparar(flotas, opts, h_pasado):
     return vehs, est, par, idx_otros, valido, ctx, pasado
 
 
-def rollout(flotas, politica, t_max=180.0, opts=None, n_vec=None,
-            horizonte=None, h_pasado=None, guardar_traj=False):
-    """Simula todas las flotas con la política. Escribe veh.traj y veh.mision_ok
-    y devuelve el nº de llegados por flota, igual que rollout_multiflota. Por
-    defecto veh.traj guarda solo la pose inicial y la final (es lo único que usa
-    la puntuación y ahorra gigabytes); con guardar_traj=True guarda el camino."""
+def rollout(flotas, politica, t_max=pol.T_MAX, opts=None, n_vec=None,
+            horizonte=None, h_pasado=None, guardar_traj=False,
+            obstaculos=None, mundo=None, cada=2):
+    """Simula todas las flotas con la política. Escribe veh.traj, veh.mision_ok y
+    veh.choque, y devuelve el nº de llegados por flota, igual que
+    rollout_multiflota. Por defecto veh.traj guarda solo la pose inicial y la
+    final (es lo único que usa la puntuación y ahorra gigabytes); con
+    guardar_traj=True guarda el camino.
+
+    't_max' son segundos SIMULADOS. La ruta más larga del dataset dura 107 s, así
+    que 300 deja sitio de sobra para una red más lenta que el planificador
+    clásico sin dar por fallido a quien sí habría llegado. No se puede quitar del
+    todo: una red que conduzca en círculos no terminaría nunca. En cuanto llegan
+    todos, el bucle sale solo, así que subirlo solo cuesta en los casos que
+    fracasan.
+
+    'obstaculos' y 'mundo' activan la comprobación de CHOQUES. Sin ellos se
+    simula la física pero no se mira si alguien atraviesa a otro o se sube a un
+    obstáculo. Se comprueba una vez cada 'cada' pasos: a 0,1 s por paso y a las
+    velocidades de estas flotas, en dos pasos nadie atraviesa un coche entero,
+    y mirarlo en todos costaría el doble para no encontrar nada nuevo."""
     if opts is None:
         opts = ["secuencial"] * len(flotas)
     n_vec = pol.N_VECINOS if n_vec is None else n_vec
@@ -398,6 +524,8 @@ def rollout(flotas, politica, t_max=180.0, opts=None, n_vec=None,
     if M == 0:
         return [0] * len(flotas)
     llegado = np.zeros(M, dtype=bool)
+    choque = np.zeros(M, dtype=bool)
+    mirar_choques = mundo is not None
     planes = np.zeros((M, pol.N_PRED, 2))
     camino = [est[:, :3].copy()] if guardar_traj else None
 
@@ -434,6 +562,18 @@ def rollout(flotas, politica, t_max=180.0, opts=None, n_vec=None,
                   & (np.abs(est[:, 3]) < pol.V_LLEGADA))
         est[recien, 3] = 0.0
         llegado |= recien
+
+        # Choques. Se acumulan: haber chocado una vez ya cuenta, aunque después
+        # se separen. No se altera la física —el vehículo sigue su camino— para
+        # no cambiar lo que ven los demás; lo que cambia es su nota.
+        if mirar_choques and paso % cada == 0:
+            por_mirar = ~choque
+            if por_mirar.any():
+                choque |= choques_entre_vehiculos(est, par, idx_otros, valido,
+                                                  por_mirar)
+                choque |= choques_con_mapa(est, par, obstaculos, mundo,
+                                           por_mirar)
+
         if guardar_traj:
             camino.append(est[:, :3].copy())
 
@@ -445,6 +585,7 @@ def rollout(flotas, politica, t_max=180.0, opts=None, n_vec=None,
                         tuple(est[m, :3])]
         veh.dt_plan = DT
         veh.mision_ok = bool(llegado[m])
+        veh.choque = bool(choque[m])
 
     llegados, base = [], 0
     for flota in flotas:

@@ -93,6 +93,18 @@ def cargar(conjunto, carpeta=None):
 # --------------------------------------------------------------------------- #
 # De escenario a flota de Vehiculo (lo que consume el rollout)
 # --------------------------------------------------------------------------- #
+def obstaculos(mapa=MAPA_ENTRENAMIENTO):
+    """(esquinas, círculos, tamaño del mundo) de los obstáculos fijos del mapa,
+    en el formato que consume la comprobación de choques del simulador rápido.
+
+    Se saca una sola vez y se reutiliza en todas las evaluaciones: el mapa no
+    cambia nunca (la red se entrena y se usa siempre sobre el mismo)."""
+    from nucleo import W as ANCHO_MUNDO, H as ALTO_MUNDO
+    env = Entorno()
+    cargar_mapa_en(env, mapa)
+    return (env.np_c, env.np_bb), (ANCHO_MUNDO, ALTO_MUNDO)
+
+
 def flotas(escenarios, mapa=MAPA_ENTRENAMIENTO, limite=None):
     """(lista de flotas, lista de modos de optimización). Los vehículos se crean
     una sola vez y se reutilizan en todas las evaluaciones: el rollout solo
