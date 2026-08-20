@@ -61,7 +61,18 @@ import entrenar as ent
 # mismo peaje sin que la diferencia significase nada. Ahora todas nacen con el
 # mismo máximo y son los peajes los que deciden hasta dónde llega cada una, que
 # es para lo que están. Un eje menos que explorar y comparaciones limpias.
-EPOCAS_MAX = 80
+# 160 y no 80 desde el 20/08/2026. Con 80, las redes grandes se quedaban a
+# medio entrenar: mirando los peajes de las pruebas ya hechas, las de más de 10M
+# de parámetros SEGUÍAN mejorando en el último tramo el 78 % de las veces
+# (+0,0109 de nota), frente al 55-66 % de las pequeñas. El récord del estudio
+# llevaba nueve horas sin moverse y quinientas pruebas dando vueltas por el
+# mismo sitio: el techo lo ponía el presupuesto, no la búsqueda.
+#
+# OJO al comparar: las pruebas anteriores a este cambio se midieron con 80. Sus
+# notas siguen en el estudio a propósito —son el mapa que ya tiene TPE— pero
+# están en desventaja, así que una zona vieja que parezca mala puede serlo solo
+# por haber entrenado la mitad.
+EPOCAS_MAX = 160
 
 ESPACIO = {k: v for k, v in EN.ESPACIO.items() if k != "epocas"}
 
@@ -78,10 +89,30 @@ NOMBRE_ESTUDIO = "tdr_flota_v3"
 # --------------------------------------------------------------------------- #
 # Siembra: meter en el estudio lo que ya se sabe
 # --------------------------------------------------------------------------- #
+# Valor que se le supone a un eje cuando el registro NO trae su columna. Pasa
+# con los ejes añadidos después de una tanda: las 241 configuraciones del primer
+# barrido se evaluaron antes de que existieran los rayos, y su columna no está.
+# Descartarlas seria tirar el grupo de CONTROL —justamente las que se corrieron
+# sin rayos—, asi que se les pone el valor que de hecho tenian: ninguno.
+NEUTRO = {"n_rayos": 0, "n_fourier": 0}
+
+
 def _leer_barridos(carpeta):
-    """Filas de los CSV de la fase aleatoria (una por configuración evaluada)."""
+    """Filas de los CSV de la fase aleatoria (una por configuración evaluada).
+
+    Busca tambien en las SUBCARPETAS: las tandas viejas se apartan ahi para no
+    mezclar registros con columnas distintas, pero sus notas siguen valiendo
+    para sembrar."""
     filas = []
-    for f in sorted(glob.glob(os.path.join(carpeta, "barrido_t*.csv"))):
+    patrones = [os.path.join(carpeta, "barrido_t*.csv"),
+                os.path.join(carpeta, "*", "barrido_t*.csv")]
+    for f in sorted(set(sum((glob.glob(pa) for pa in patrones), []))):
+        # Una subcarpeta con este fichero guarda notas que YA NO VALEN (se
+        # midieron con otra vara: sin mirar colisiones, o con la escala de
+        # choque que se hundia a cero). Sembrar con ellas le ensenaria al
+        # muestreador justo lo contrario de lo que debe.
+        if os.path.exists(os.path.join(os.path.dirname(f), "NO_SEMBRAR.txt")):
+            continue
         with open(f, encoding="utf-8", newline="") as fh:
             for r in csv.DictReader(fh):
                 try:
@@ -123,7 +154,8 @@ def sembrar(estudio, carpeta, verbose=True):
     nuevas, descartadas = 0, 0
     for fila in _leer_barridos(carpeta):
         try:
-            params = {k: _valor_del_eje(k, fila[k]) for k in ESPACIO}
+            params = {k: _valor_del_eje(k, fila[k]) if fila.get(k) is not None
+                      else NEUTRO[k] for k in ESPACIO}
         except (KeyError, ValueError):
             descartadas += 1
             continue
@@ -152,6 +184,26 @@ def sembrar(estudio, carpeta, verbose=True):
               f"añadidas ({descartadas} descartadas por usar valores ya "
               f"retirados)", flush=True)
     return nuevas
+
+
+def _tomar_cerrojo(carpeta, nombre="siembra.lock"):
+    """True solo para el PRIMER proceso que lo pide. Ver el comentario en main.
+
+    No se borra al terminar a propósito: el cerrojo marca "esta carpeta ya se
+    sembró", así que una segunda tanda de trabajadores (tras un corte, o al
+    añadir procesos) tampoco vuelve a meter la fase 1 encima de lo que ya está.
+    Para volver a sembrar de cero hay que borrarlo a mano, que es una decisión
+    lo bastante seria como para pedir ese gesto."""
+    ruta = os.path.join(carpeta, nombre)
+    try:
+        fd = os.open(ruta, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        return False
+    except OSError:
+        return False
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write("sembrado por el pid %d" % os.getpid())
+    return True
 
 
 def sembrar_de_estudio(estudio, nombre_origen, almacen, verbose=True):
@@ -322,8 +374,14 @@ class Evaluador:
             return False
 
         try:
+            # OJO: los mismos ejes de representación que use la vista tienen
+            # que ir luego al rollout de la nota (ver EN.nota_de). Si aquí falta
+            # uno, la red se entrena con menos columnas de las que recibe al
+            # evaluarla y revienta con un desajuste de tamaños.
             V, media, escala = self.datos.vista(c["n_vecinos"], c["horizonte"],
-                                                c["h_pasado"])
+                                                c["h_pasado"],
+                                                c.get("n_fourier", 0),
+                                                c.get("n_rayos", 0))
             red, estado, val, eps = EN.entrenar_config(
                 V, self.datos, c, self.device, criba=None,
                 enfasis=self.args.enfasis, aviso=aviso)
@@ -464,7 +522,18 @@ def main():
                     reduction_factor=args.reduccion,
                     min_early_stopping_rate=0)))
 
-    if not args.sin_siembra:
+    # La siembra la hace UN SOLO trabajador. Todos arrancan a la vez y todos
+    # llamarían a sembrar(); su comprobación de "esta ya está" mira los trials
+    # que hay en ese momento, así que con tres procesos leyendo el estudio vacío
+    # al mismo tiempo, los tres añaden la fase 1 entera. Pasó: 484 pruebas para
+    # 241 configuraciones, alguna repetida cinco veces. Y no es inofensivo: TPE
+    # cuenta pruebas, así que una zona duplicada le parece el triple de
+    # explorada de lo que está y concentra ahí lo que le queda.
+    #
+    # El cerrojo es un fichero creado con O_EXCL, que en Windows y en POSIX es
+    # atómico: lo consigue exactamente uno. Los demás siguen sin sembrar, que es
+    # justo lo que se quiere —la siembra ya la está haciendo otro—.
+    if not args.sin_siembra and _tomar_cerrojo(args.salida):
         sembrar(estudio, args.salida)
     if args.sembrar_de:
         sembrar_de_estudio(estudio, args.sembrar_de, almacen)

@@ -44,8 +44,22 @@ import vectorizado as vec
 # del espacio de búsqueda, y NO se puede subir después sin rehacer los datos.
 # Con flotas de hasta 8 vehículos, un vehículo nunca ve más de 7 vecinos.
 N_VEC_MAX = 7
-H_MAX = 10
+# 20 y no 10: con 241 configuraciones evaluadas, el mejor h_pasado salio pegado
+# al tope de 10, o sea que mas historia de controles podia seguir mejorando y el
+# intervalo se quedaba corto. Subirlo cuesta 2 columnas por paso en el superset
+# y nada en el entrenamiento (cada configuracion se queda con las que use).
+H_MAX = 20
 HOR_MAX = 20
+# Frecuencias de la posición en senos y cosenos (ver politica.N_FOURIER). El
+# superset las guarda TODAS y cada punto del barrido se queda con las primeras,
+# así que el eje se recorre sin volver a tocar los CSV; subir este tope sí
+# obliga a rehacer las muestras.
+N_F_MAX = pol.N_FOURIER_MAX
+# RAYOS al obstáculo (ver rayos.py). El superset guarda los tres conjuntos
+# (8, 12 y 18) y cada configuración se queda con el suyo. Aquí es donde de
+# verdad se miran los obstáculos: se recorre cada instante de cada ruta y se
+# traza contra el mapa, que es lo que no se puede sacar del CSV.
+CON_RAYOS = True
 
 
 # --------------------------------------------------------------------------- #
@@ -136,15 +150,23 @@ def es_validacion(run_id):
 def procesar(tarea):
     from entrenar import MODO_ENTRADA
     arch, salida, paso, etiqueta = tarea
+    # Cada proceso carga el mapa y la tabla de rayos por su cuenta: son
+    # procesos 'spawn', no heredan nada. La tabla está cacheada en disco, así
+    # que solo el primero que la necesite la construye.
+    mapa_rayos = None
+    if CON_RAYOS:
+        import escenarios as esc
+        mapa_rayos = esc.obstaculos()
     runs = leer_archivo(arch)
-    Xs, TCs, Ys, Vs, Ms, Ns = [], [], [], [], [], []
+    Xs, TCs, Ys, Vs, Ms, Ns, Ls = [], [], [], [], [], [], []
     for run_id, conds, opt, datos in runs:
         # En la ENTRADA de la red va el modo de PLANIFICACIÓN: las reutilizadas
         # y las gemelas se planificaron como secuencial. Sin esta traducción su
         # one-hot de modo se quedaría todo a CERO, un código de contexto que en
         # el uso real no aparece nunca (igual que en el pipeline local).
         X, TC, Y = vec.superset_run(conds, MODO_ENTRADA.get(opt, opt), datos,
-                                    N_VEC_MAX, H_MAX, HOR_MAX)
+                                    N_VEC_MAX, H_MAX, HOR_MAX, N_F_MAX,
+                                    mapa_rayos)
         if paso > 1:
             X, TC, Y = X[::paso], TC[::paso], Y[::paso]
         Xs.append(X)
@@ -156,8 +178,9 @@ def procesar(tarea):
         Ms.append(np.full(len(X), codigo_etiqueta(opt), dtype=np.int8))
         Ns.append(np.full(len(X), sum(1 for v in datos if v in conds),
                           dtype=np.int8))
+        Ls += [conds[v]["largo"] for v in datos if v in conds]
     if not Xs:
-        return etiqueta, 0, len(runs)
+        return etiqueta, 0, len(runs), []
     X = np.concatenate(Xs)
     np.save(os.path.join(salida, f"{etiqueta}_X.npy"), X)
     np.save(os.path.join(salida, f"{etiqueta}_TC.npy"), np.concatenate(TCs))
@@ -165,7 +188,7 @@ def procesar(tarea):
     np.save(os.path.join(salida, f"{etiqueta}_val.npy"), np.concatenate(Vs))
     np.save(os.path.join(salida, f"{etiqueta}_modo.npy"), np.concatenate(Ms))
     np.save(os.path.join(salida, f"{etiqueta}_nveh.npy"), np.concatenate(Ns))
-    return etiqueta, len(X), len(runs)
+    return etiqueta, len(X), len(runs), Ls
 
 
 def main():
@@ -187,8 +210,10 @@ def main():
         raise SystemExit(f"No hay CSV en {args.rutas}.")
     asegurar(args.salida)
     print(f"[prep] {len(archivos)} ficheros · superset n_vecinos={N_VEC_MAX} "
-          f"h_pasado={H_MAX} horizonte={HOR_MAX} "
-          f"(dim {vec.dim_super(N_VEC_MAX, H_MAX)}) · paso {args.paso}",
+          f"h_pasado={H_MAX} horizonte={HOR_MAX} fourier={N_F_MAX} "
+          f"rayos={'si' if CON_RAYOS else 'no'} "
+          f"(dim {vec.dim_super(N_VEC_MAX, H_MAX, N_F_MAX, CON_RAYOS)}) "
+          f"· paso {args.paso}",
           flush=True)
 
     tareas = [(a, args.salida, args.paso, f"lote{i:04d}")
@@ -202,11 +227,32 @@ def main():
         with ProcessPoolExecutor(max_workers=procesos, mp_context=ctx) as ex:
             resultados = list(ex.map(procesar, tareas))
 
-    lotes = [(e, n) for e, n, _ in resultados if n]
+    lotes = [(e, n) for e, n, _, _ in resultados if n]
     filas = sum(n for _, n in lotes)
-    runs = sum(r for _, _, r in resultados)
+    runs = sum(r for _, _, r, _ in resultados)
+
+    # La REGLA de las ondas (politica.LARGO_REF) es una constante elegida a
+    # partir del tamaño típico de vehículo. Si el generador cambia y los
+    # vehículos pasan a ser otros, esa regla deja de caer donde debe y el
+    # bloque de Fourier se descalibra sin que nada falle: aquí se compara con
+    # la mediana REAL del dataset recién construido y se avisa.
+    largos = np.concatenate([np.asarray(L) for _, _, _, L in resultados
+                             if len(L)]) if resultados else np.zeros(0)
+    med = float(np.median(largos)) if len(largos) else 0.0
+    if med and abs(med - pol.LARGO_REF) / pol.LARGO_REF > 0.25:
+        print(f"[prep] AVISO: el largo mediano del dataset es {med:.3f} pero "
+              f"politica.LARGO_REF vale {pol.LARGO_REF:.3f}. Las ondas de la "
+              f"posición están calibradas para otro tamaño de vehículo: "
+              f"ajusta LARGO_REF y vuelve a preparar los datos.", flush=True)
+
     meta = {"n_vec_max": N_VEC_MAX, "h_max": H_MAX, "hor_max": HOR_MAX,
-            "dim_super": vec.dim_super(N_VEC_MAX, H_MAX), "n_pred": pol.N_PRED,
+            "n_f_max": N_F_MAX, "con_rayos": CON_RAYOS,
+            "largo_ref": pol.LARGO_REF,
+            "largo_mediano": round(med, 4),
+            "lambda_fina": pol.LAMBDA_FINA,
+            "dim_super": vec.dim_super(N_VEC_MAX, H_MAX, N_F_MAX,
+                                       CON_RAYOS),
+            "n_pred": pol.N_PRED,
             "paso": args.paso, "filas": filas, "runs": runs,
             "etiquetas": list(ETIQUETAS),
             "lotes": [e for e, _ in lotes]}

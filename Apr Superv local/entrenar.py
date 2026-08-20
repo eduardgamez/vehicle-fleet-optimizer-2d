@@ -336,6 +336,26 @@ ESCALA_ANG = math.radians(30.0)
 # puede salir a cuenta.
 FACTOR_CHOQUE = 0.1
 
+# Segundos tocando algo a partir de los cuales la nota del choque se reduce a
+# 1/e. Hace falta porque el planificador clásico conduce con 10-20 cm de holgura
+# y CUALQUIER red que se desvíe un palmo choca: sin graduar, todas empatan en
+# "chocó" y no hay forma de premiar a la que solo roza un instante frente a la
+# que se pasa el trayecto metida en un muro. Con esto, dentro del tramo de
+# choque sigue habiendo una pendiente por la que mejorar.
+#
+# El valor sale MEDIDO, no a ojo: la mejor red disponible sobre los 480
+# escenarios de selección (2292 vehículos) reparte así los segundos tocando
+#     p05 4,0 · p25 11,6 · p50 26,0 · p75 60,8 · p90 126,6 (máx. 288)
+# es decir, casi nadie "roza un instante": la mitad se pasa medio minuto o más
+# arrastrándose. Con el 2.0 original la exponencial se hundía a cero exacto
+# pasados unos 40 s, así que TODAS las que chocan empataban en 0 y la pendiente
+# que se buscaba no existía: lo que ordenaba el barrido era solo el prox·ang de
+# los pocos vehículos limpios. Puesto en la mediana medida, el tramo de choque
+# vuelve a repartir nota en todo el rango real (p05 → 0,88 · p50 → 0,42 ·
+# p90 → 0,01). Si algún día las redes conducen mucho más limpias, este número
+# hay que volver a bajarlo: debe seguir siendo del orden de la mediana.
+ESCALA_SEG_CHOQUE = 30.0
+
 
 def _puntuar_vehiculo(veh):
     """Nota POSITIVA de un vehículo tras el rollout:
@@ -373,7 +393,11 @@ def _puntuar_vehiculo(veh):
     else:
         ang = math.exp(-abs(ang_norm(fth - veh.meta_th)) / ESCALA_ANG)
     if getattr(veh, "choque", False):
-        return FACTOR_CHOQUE * prox * (0.5 + 0.5 * ang)
+        # Cuanto más tiempo tocando, peor: rozar un instante no es lo mismo que
+        # atravesar un muro de lado a lado.
+        limpieza = math.exp(-getattr(veh, "seg_choque", 0.0)
+                            / ESCALA_SEG_CHOQUE)
+        return FACTOR_CHOQUE * limpieza * prox * (0.5 + 0.5 * ang)
     if veh.mision_ok:
         return 1.0 + ang
     return 0.5 * prox * (0.5 + 0.5 * ang)
@@ -509,6 +533,8 @@ def _cfg(arq, nota=None, val=None):
             "n_capas": arq["n_capas"], "dropout": arq["dropout"],
             "activacion": arq["activacion"], "n_vecinos": pol.N_VECINOS,
             "horizonte": pol.HORIZONTE_VECINO,
+            "n_fourier": pol.N_FOURIER, "lambda_fina": pol.LAMBDA_FINA,
+            "n_rayos": pol.N_RAYOS,
             "normalizacion": arq.get("normalizacion", "no"),
             "nota_rollout": nota, "val_mse": val}
 
@@ -658,16 +684,30 @@ def main(args):
 # como dato en la red —se entrena y se usa siempre sobre el mismo, así que
 # tiene que memorizarlo—, y memorizar pide parámetros: las redes profundas son
 # justo las que no convenía quitar.
+# Tres ejes se AMPLIARON tras el barrido aleatorio, porque su mejor valor salió
+# pegado a un extremo de la lista y eso significa que lo bueno puede estar más
+# allá: dropout ganaba con 0,2 (el tope), h_pasado con 3 (el mínimo) y horizonte
+# con 20 (el tope). También se alargó 'lr' por arriba, que es harina de otro
+# costal: los tres valores de partida son los típicos de adamw, y con ellos sgd
+# nunca tuvo una oportunidad justa —necesita pasos bastante mayores—, así que
+# quedaba mal medido y habría acabado pareciendo inútil sin serlo.
+#
+# NO se ha quitado ningún eje ni ningún valor. Varios (activacion, n_vecinos,
+# normalizacion, n_fourier) no mueven la nota MEDIA, pero eso no es lo mismo que
+# no servir: un eje puede dar igual de media y decidir entre las mejores, que es
+# donde se elige la ganadora. Ya pasó una vez —se retiraron sgd y las 6 capas
+# por notas medidas sin colisiones, y hubo que deshacerlo—, así que ante la duda
+# se amplía, no se recorta.
 ESPACIO = {
     "n_capas":      [2, 3, 4, 6],
     "oculto":       [256, 512, 1024, 2048, 4096],
-    "dropout":      [0.0, 0.1, 0.2],
+    "dropout":      [0.0, 0.1, 0.2, 0.35],
     "activacion":   ["relu", "gelu", "silu"],
-    "lr":           [1e-3, 3e-3, 8e-3],
+    "lr":           [1e-3, 3e-3, 8e-3, 2e-2],
     "lote":         [512, 2048, 8192, 16384],
     "n_vecinos":    [2, 3, 5],
-    "h_pasado":     [3, 5, 10],
-    "horizonte":    [10, 15, 20],
+    "h_pasado":     [1, 2, 3, 5, 10, 15, 20],
+    "horizonte":    [10, 15, 20, 30],
     # Presupuesto único. Dejó de ser un eje de búsqueda: era a la vez algo que
     # el muestreador elegía y algo que los peajes de la fase 2 recortaban, y eso
     # hacía que dos candidatas idénticas salvo por el presupuesto compitieran

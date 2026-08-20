@@ -31,6 +31,7 @@ import psutil
 
 import comun
 from comun import MODELOS_DIR
+import buscar_optuna as bo
 import grafica
 
 RAIZ = os.path.dirname(os.path.abspath(__file__))
@@ -141,9 +142,28 @@ class Supervisor:
 
     def _completar(self):
         self.mios = [p for p in self.mios if p.poll() is None]
-        faltan = self.procesos - len(trabajadores_vivos())
-        for i in range(max(0, faltan)):
-            self.mios.append(self._lanzar_uno(len(self.mios) + i))
+        # Números de trabajador LIBRES, no un contador. Con 'len(self.mios) + i'
+        # el número dependía de cuántos siguen vivos, así que tras una caída se
+        # repetían unos y se saltaban otros (llegó a haber dos con el mismo).
+        ocupados = set()
+        for p in trabajadores_vivos():
+            cmd = p.info.get("cmdline") or []
+            if "--idt" in cmd:
+                try:
+                    ocupados.add(int(cmd[cmd.index("--idt") + 1]))
+                except (ValueError, IndexError):
+                    pass
+        # Se cuentan también los que YA se han lanzado aunque aún no aparezcan
+        # como trabajadores: un proceso tarda medio minuto en cargar el dataset
+        # y hasta entonces no se le ve, así que el vigilante creía que faltaban
+        # y lanzaba de más. Con cuatro a la vez se cae el driver de la tarjeta.
+        arrancando = sum(1 for p in self.mios if p.poll() is None)
+        faltan = self.procesos - max(len(trabajadores_vivos()), arrancando)
+        libres = (i for i in range(self.procesos * 4) if i not in ocupados)
+        for _ in range(max(0, faltan)):
+            idt = next(libres, 0)
+            ocupados.add(idt)
+            self.mios.append(self._lanzar_uno(idt))
 
     def _vigilar(self):
         while True:
@@ -246,12 +266,19 @@ def crear_manejador(sup, args):
 def main():
     ap = argparse.ArgumentParser(description="Panel de control de la búsqueda.")
     ap.add_argument("--puerto", type=int, default=8770)
-    ap.add_argument("--procesos", type=int, default=4)
-    ap.add_argument("--frac-vram", dest="frac_vram", type=float, default=0.0,
+    # 3 procesos, no 4: con más se cae el driver de la tarjeta (eventos
+    # nvlddmkm 153) y se lleva por delante la tanda entera. Con 3 y un 27 % de
+    # memoria cada uno aguanta horas, y la tarjeta ya llega al 98 %, así que el
+    # cuarto no daría rendimiento de todos modos (medido: +9 %).
+    ap.add_argument("--procesos", type=int, default=3)
+    ap.add_argument("--frac-vram", dest="frac_vram", type=float, default=0.27,
                     help="memoria de tarjeta por proceso; 0 = repartir sola")
     ap.add_argument("--n-pruebas", dest="n_pruebas", type=int, default=5000)
     ap.add_argument("--n-escenarios", dest="n_escenarios", type=int, default=400)
-    ap.add_argument("--estudio", default="tdr_flota_v2")
+    # El nombre que MIRA el panel tiene que ser el mismo al que ESCRIBEN los
+    # trabajadores (buscar_optuna.NOMBRE_ESTUDIO). Los estudios v1 y v2 son de
+    # cuando la nota no miraba las colisiones y están archivados.
+    ap.add_argument("--estudio", default=bo.NOMBRE_ESTUDIO)
     ap.add_argument("--refresco", type=int, default=30)
     ap.add_argument("--suavizado", type=float, default=grafica.SUAVIZADO_MIN)
     ap.add_argument("--objetivo", type=int, default=4800)

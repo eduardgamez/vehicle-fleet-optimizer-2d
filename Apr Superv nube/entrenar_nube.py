@@ -78,8 +78,29 @@ MEZCLAS = {
 }
 ESPACIO["mezcla"] = ["natural", "cap_rec", "raros_x2", "raros_x4"]
 
+# POSICIÓN EN SENOS Y COSENOS: nº de longitudes de onda (ver politica.N_FOURIER).
+# Entra como eje y no activado a secas porque es una HIPÓTESIS sobre por qué se
+# choca tanto —que la red no distingue bien un palmo a partir de la coordenada
+# cruda, y por eso no aprende dónde está el borde de un muro—. Con 0 en la lista,
+# el propio barrido dice si sirve: si las de 0 chocan lo mismo que las de 8, el
+# problema estaba en otro sitio. Las ondas van de la más fina hacia arriba, así
+# que 6 cubren de 1/32 a 1 vehículo (el detalle local, que es lo que se pone a
+# prueba) y 12 llegan hasta 64 vehículos, o sea mucho más que el mapa entero.
+ESPACIO["n_fourier"] = [0, 6, 12]
+
+# RAYOS al obstáculo (ver rayos.py): en cuántas direcciones mira el vehículo.
+# Es la primera idea que añade INFORMACIÓN en vez de recodificar la que ya hay:
+# la distancia libre es lo que decide si chocas, y hasta ahora había que
+# deducirla de (x, y) más el mapa aprendido en los pesos.
+#
+# El 0 sigue en la lista para la fase 2, pero la tanda de fase 1 que mide esto
+# se lanza SIN él (--espacio con solo 8, 12 y 18): las 241 configuraciones ya
+# evaluadas son el grupo de control con 0 rayos, así que repetirlo sería gastar
+# pruebas en algo que ya está medido.
+ESPACIO["n_rayos"] = [0, 8, 12, 18]
+
 CAMPOS = ["nota_seleccion" if c == "nota_rollout" else c for c in CAMPOS_EXTRA]
-CAMPOS += ["epocas_hechas", "pct_choque", "pct_llegada"]
+CAMPOS += ["epocas_hechas", "pct_choque", "pct_llegada", "seg_choque"]
 
 
 # --------------------------------------------------------------------------- #
@@ -186,6 +207,10 @@ class Datos:
 
         self.n_vec_max = self.meta["n_vec_max"]
         self.h_max = self.meta["h_max"]
+        # Datasets preparados antes de que existiera el bloque de Fourier no lo
+        # traen: con 0, el eje n_fourier se queda sin efecto en vez de reventar.
+        self.n_f_max = self.meta.get("n_f_max", 0)
+        self.con_rayos = bool(self.meta.get("con_rayos", False))
         self.device = device
         # Con el dataset completo puede no caber en la GPU. En ese caso se queda
         # en la memoria del ordenador y cada lote se sube al vuelo: es más lento
@@ -296,12 +321,16 @@ class Datos:
         escala = (suma2 / n - media * media).clamp_min(0).sqrt().clamp_min(1e-6)
         return media.float(), escala.float()
 
-    def vista(self, n_vec, horizonte, h_pasado):
+    def vista(self, n_vec, horizonte, h_pasado, n_fourier=0, n_rayos=0):
         """(tensor (M, dim) normalizado, media, escala) de una configuración."""
         import torch
-        clave = (n_vec, h_pasado)
+        n_fourier = min(int(n_fourier), self.n_f_max)
+        n_rayos = int(n_rayos) if self.con_rayos else 0
+        clave = (n_vec, h_pasado, n_fourier, n_rayos)
         if clave not in self.cols_cache:
-            cols = vec.columnas_vista(n_vec, h_pasado, self.n_vec_max, self.h_max)
+            cols = vec.columnas_vista(n_vec, h_pasado, self.n_vec_max,
+                                      self.h_max, n_fourier, self.n_f_max,
+                                      n_rayos, self.con_rayos)
             self.cols_cache[clave] = torch.from_numpy(cols).to(self.dev_datos)
         V = torch.index_select(self.X, 1, self.cols_cache[clave])
         # Horizonte: los bloques de vecino cuyo tiempo de cierre lo supera se
@@ -448,7 +477,9 @@ def nota_de(red, estado, media, escala, device, flotas, opts, c):
     obst, mundo = mapa_de_choques()
     vec.rollout(flotas, politica, opts=opts, n_vec=c["n_vecinos"],
                 horizonte=c["horizonte"], h_pasado=c["h_pasado"],
-                obstaculos=obst, mundo=mundo)
+                obstaculos=obst, mundo=mundo,
+                n_fourier=c.get("n_fourier", 0),
+                n_rayos=c.get("n_rayos", 0))
     total = sum(_puntuar_vehiculo(v) for f in flotas for v in f)
     n = sum(len(f) for f in flotas)
     # Se guardan aparte cuántos chocan y cuántos llegan. La nota los mezcla en
@@ -458,6 +489,10 @@ def nota_de(red, estado, media, escala, device, flotas, opts, c):
                            if getattr(v, "choque", False)) / n) if n else 0.0
     nota_de.llegadas = (sum(1 for f in flotas for v in f
                             if v.mision_ok) / n) if n else 0.0
+    # Segundos MEDIOS tocando algo: con casi todas chocando, esta es la cifra
+    # que de verdad separa a unas de otras.
+    nota_de.seg_choque = (sum(getattr(v, "seg_choque", 0.0)
+                              for f in flotas for v in f) / n) if n else 0.0
     return total / n if n else 0.0
 
 
@@ -509,12 +544,44 @@ def _configs(args):
         espacio = ESPACIO
     claves = list(ESPACIO.keys())
     _rnd.seed(args.semilla)
-    todas = list(itertools.product(*(espacio[k] for k in claves)))
-    _rnd.shuffle(todas)
-    if not args.exhaustivo:
-        n = (int(round(args.fraccion * len(todas))) if args.fraccion
+
+    # Cuántas combinaciones tiene el espacio, SIN construirlas. Hace falta el
+    # número para la opción --fraccion, y construir la lista es justo lo que no
+    # se puede hacer: con quince ejes el producto cartesiano son 139 millones de
+    # tuplas y el proceso se queda sin memoria antes de empezar (pasó: tres
+    # trabajadores veinte minutos atascados ahí, con la tarjeta al 1 %).
+    total = 1
+    for k in claves:
+        total *= len(espacio[k])
+
+    if args.exhaustivo:
+        # Recorrer el espacio ENTERO solo tiene sentido cuando es pequeño (una
+        # rejilla fina alrededor de una ganadora, que es para lo que está).
+        if total > 2_000_000:
+            raise SystemExit(
+                f"--exhaustivo sobre {total:,} combinaciones no cabe en "
+                f"memoria. Reduce el espacio con --espacio, o quita "
+                f"--exhaustivo para sortear al azar.")
+        todas = list(itertools.product(*(espacio[k] for k in claves)))
+        _rnd.shuffle(todas)
+    else:
+        n = (int(round(args.fraccion * total)) if args.fraccion
              else args.n_configs)
-        todas = todas[:max(1, n)]
+        n = max(1, min(n, total))
+        # Sorteo SIN construir el producto: se elige un valor de cada eje. Se
+        # descartan las repetidas para no gastar dos veces en lo mismo; con un
+        # espacio tan grande frente a las pocas que se prueban, las colisiones
+        # son rarísimas, pero el tope de intentos evita el bucle infinito si
+        # alguien restringe el espacio a menos combinaciones que 'n'.
+        vistas, todas, intentos = set(), [], 0
+        while len(todas) < n and intentos < 200 * n + 1000:
+            intentos += 1
+            vals = tuple(_rnd.choice(espacio[k]) for k in claves)
+            if vals in vistas:
+                continue
+            vistas.add(vals)
+            todas.append(vals)
+
     configs = [dict(zip(claves, vals)) for vals in todas]
     return claves, comun.reparto(configs, args.tarea, args.tareas)
 
@@ -644,7 +711,9 @@ def main():
             t_c = time.perf_counter()
             try:
                 V, media, escala = datos.vista(c["n_vecinos"], c["horizonte"],
-                                               c["h_pasado"])
+                                               c["h_pasado"],
+                                               c.get("n_fourier", 0),
+                                               c.get("n_rayos", 0))
                 red, estado, val, eps = entrenar_config(V, datos, c, device,
                                                         criba, args.enfasis)
                 nota = nota_de(red, estado, media, escala, device, flotas,
@@ -668,6 +737,7 @@ def main():
                          "epocas_hechas": eps,
                          "pct_choque": round(100 * nota_de.choques, 1),
                          "pct_llegada": round(100 * nota_de.llegadas, 1),
+                         "seg_choque": round(nota_de.seg_choque, 2),
                          "segundos": round(time.perf_counter() - t_c, 1)})
             w.writerow(fila)
             fcsv.flush()
@@ -721,7 +791,9 @@ def guardar_mejor(salida, idt, mejor):
                 return
         except (OSError, KeyError, RuntimeError, EOFError):
             pass                      # fichero ilegible o a medias: se rehace
-    pol.configurar_representacion(c["n_vecinos"], c["horizonte"], c["h_pasado"])
+    pol.configurar_representacion(c["n_vecinos"], c["horizonte"], c["h_pasado"],
+                                  c.get("n_fourier", 0), None,
+                                  c.get("n_rayos", 0))
     arq = {"oculto": c["oculto"], "n_capas": c["n_capas"],
            "dropout": c["dropout"], "activacion": c["activacion"],
            "normalizacion": c.get("normalizacion", "no")}
@@ -732,3 +804,4 @@ def guardar_mejor(salida, idt, mejor):
 
 if __name__ == "__main__":
     main()
+

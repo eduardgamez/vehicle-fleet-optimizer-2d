@@ -26,33 +26,43 @@ import numpy as np
 import comun                                   # añade «Apr Superv local» al path
 import politica as pol
 import entrenar as ent
+import escenarios as esc
 import vectorizado as vec
 
 
-def _muestras_referencia(runs, n_vec, horizonte, h_pasado):
-    pol.configurar_representacion(n_vec, horizonte, h_pasado)
+def _muestras_referencia(runs, n_vec, horizonte, h_pasado, n_fourier=0,
+                         n_rayos=0):
+    pol.configurar_representacion(n_vec, horizonte, h_pasado, n_fourier, None,
+                                  n_rayos)
     return ent.construir_muestras(runs)
 
 
-def _muestras_nube(runs, n_vec, horizonte, h_pasado, n_vec_max, h_max, hor_max):
+def _muestras_nube(runs, n_vec, horizonte, h_pasado, n_vec_max, h_max, hor_max,
+                   n_fourier=0, n_f_max=0, n_rayos=0, con_rayos=False):
+    mapa_r = esc.obstaculos() if con_rayos else None
     Xs, TCs, Ys = [], [], []
     for _, conds, opt, datos in runs:
-        X, TC, Y = vec.superset_run(conds, opt, datos, n_vec_max, h_max, hor_max)
+        X, TC, Y = vec.superset_run(conds, opt, datos, n_vec_max, h_max, hor_max,
+                                    n_f_max, mapa_r)
         Xs.append(X)
         TCs.append(TC)
         Ys.append(Y)
     X = np.concatenate(Xs)
     TC = np.concatenate(TCs)
     Y = np.concatenate(Ys)
-    return recortar(X, TC, n_vec, horizonte, h_pasado, n_vec_max, h_max), Y
+    return (recortar(X, TC, n_vec, horizonte, h_pasado, n_vec_max, h_max,
+                     n_fourier, n_f_max, n_rayos, con_rayos), Y)
 
 
-def recortar(X, TC, n_vec, horizonte, h_pasado, n_vec_max, h_max):
+def recortar(X, TC, n_vec, horizonte, h_pasado, n_vec_max, h_max,
+             n_fourier=0, n_f_max=0, n_rayos=0, con_rayos=False):
     """Vista de una representación concreta a partir del superset: recorte de
     columnas + puesta a cero de los vecinos que el horizonte descarta."""
     base_vec = vec.DIM_EGO + vec.DIM_META + 2 * h_max
     vivos = vec.mascara_horizonte(TC[:, :n_vec], horizonte)
-    V = X[:, vec.columnas_vista(n_vec, h_pasado, n_vec_max, h_max)].copy()
+    V = X[:, vec.columnas_vista(n_vec, h_pasado, n_vec_max, h_max,
+                                n_fourier, n_f_max, n_rayos,
+                                con_rayos)].copy()
     ini = vec.DIM_EGO + vec.DIM_META + 2 * h_pasado
     bloques = V[:, ini:ini + vec.DIM_VECINO * n_vec].reshape(
         len(V), n_vec, vec.DIM_VECINO)
@@ -78,20 +88,37 @@ def comparar(nombre, a, b, tol=2e-4):
     return ok
 
 
-def verificar_muestras(runs, n_vec_max, h_max, hor_max):
+def verificar_muestras(runs, n_vec_max, h_max, hor_max, n_f_max=0,
+                      con_rayos=False):
     print("[1] muestras: superset + recorte  vs  entrenar.construir_muestras")
     todo_ok = True
-    casos = [(n_vec_max, hor_max, h_max),      # el propio superset
-             (2, 15, 3), (3, 10, 5), (1, 20, 2), (5, 15, 10)]
-    for n_vec, horizonte, h_pasado in casos:
+    # El último valor es n_fourier: hay que cubrir el 0 (sin el bloque), el tope
+    # y un recorte intermedio, que es donde se vería si las ondas se quedan
+    # desordenadas o desplazadas al recortar columnas.
+    # El ultimo valor es n_rayos: hay que cubrir los tres conjuntos, porque el
+    # superset los guarda seguidos y una vista se queda con UN tramo; si los
+    # desplazamientos estuvieran mal, una configuracion recibiria los rayos de
+    # otra sin que nada fallara.
+    import rayos
+    r8, r12, r18 = (rayos.CONJUNTOS if con_rayos else (0, 0, 0))
+    casos = [(n_vec_max, hor_max, h_max, n_f_max, r18),   # el propio superset
+             (2, 15, 3, 0, 0), (3, 10, 5, 0, 0), (1, 20, 2, 0, 0),
+             (5, 15, 10, 0, 0),
+             (3, 15, 5, min(4, n_f_max), 0), (2, 10, 3, min(1, n_f_max), 0),
+             (3, 15, 5, 0, r8), (2, 20, 3, min(6, n_f_max), r12),
+             (5, 10, 10, n_f_max, r8)]
+    for n_vec, horizonte, h_pasado, n_f, n_r in casos:
         if n_vec > n_vec_max or h_pasado > h_max or horizonte > hor_max:
             continue
         # construir_muestras devuelve (X, Y, M): la M es la etiqueta de modo de
         # cada fila, que aquí no se compara (no forma parte de la entrada).
-        Xr, Yr = _muestras_referencia(runs, n_vec, horizonte, h_pasado)[:2]
+        Xr, Yr = _muestras_referencia(runs, n_vec, horizonte, h_pasado, n_f,
+                                      n_r)[:2]
         (Xn, Yn) = _muestras_nube(runs, n_vec, horizonte, h_pasado,
-                                  n_vec_max, h_max, hor_max)
-        etiqueta = f"n_vecinos={n_vec} horizonte={horizonte} h_pasado={h_pasado}"
+                                  n_vec_max, h_max, hor_max, n_f, n_f_max,
+                                  n_r, con_rayos)
+        etiqueta = (f"n_vecinos={n_vec} horizonte={horizonte} "
+                    f"h_pasado={h_pasado} n_fourier={n_f} n_rayos={n_r}")
         todo_ok &= comparar(f"X · {etiqueta}", Xn, Xr)
         todo_ok &= comparar(f"Y · {etiqueta}", Yn, Yr)
     return todo_ok
@@ -111,12 +138,15 @@ class PoliticaFalsa:
         return y.reshape(len(obs), pol.N_PRED, 2)
 
 
-def verificar_rollout(rutas, n_vec, horizonte, h_pasado):
+def verificar_rollout(rutas, n_vec, horizonte, h_pasado, n_fourier=0,
+                      n_rayos=0):
     print("[2] rollout vectorizado  vs  politica.rollout_multiflota")
     import vectorizado as vec
     from politica import rollout_multiflota
 
-    pol.configurar_representacion(n_vec, horizonte, h_pasado)
+    pol.configurar_representacion(n_vec, horizonte, h_pasado, n_fourier, None,
+                                  n_rayos)
+    obst_r, mundo_r = esc.obstaculos() if n_rayos else (None, None)
     escenarios = ent.escenarios_eval(rutas)[:12]
     if not escenarios:
         print("  [--] no hay escenarios en la carpeta de rutas")
@@ -132,7 +162,9 @@ def verificar_rollout(rutas, n_vec, horizonte, h_pasado):
 
     flotas2 = [ent._flota_de(a, r) for a, r, _ in escenarios]
     vec.rollout(flotas2, politica, opts=opts, n_vec=n_vec,
-                        horizonte=horizonte, h_pasado=h_pasado)
+                        horizonte=horizonte, h_pasado=h_pasado,
+                        n_fourier=n_fourier, n_rayos=n_rayos,
+                        obstaculos=obst_r, mundo=mundo_r)
     nue = np.array([[v.traj[-1][0], v.traj[-1][1], v.traj[-1][2],
                      float(v.mision_ok)]
                     for f in flotas2 for v in f])
@@ -147,6 +179,10 @@ def main():
     ap.add_argument("--n-vec-max", dest="n_vec_max", type=int, default=7)
     ap.add_argument("--h-max", dest="h_max", type=int, default=10)
     ap.add_argument("--hor-max", dest="hor_max", type=int, default=20)
+    ap.add_argument("--n-f-max", dest="n_f_max", type=int,
+                    default=pol.N_FOURIER_MAX)
+    ap.add_argument("--sin-rayos", dest="con_rayos", action="store_false",
+                    default=True)
     args = ap.parse_args()
 
     print(f"[datos] leyendo {args.rutas} …")
@@ -155,8 +191,19 @@ def main():
         raise SystemExit("No hay CSV de rutas con los que comparar.")
     print(f"[datos] {len(runs)} runs")
 
-    ok = verificar_muestras(runs, args.n_vec_max, args.h_max, args.hor_max)
+    ok = verificar_muestras(runs, args.n_vec_max, args.h_max, args.hor_max,
+                            args.n_f_max, args.con_rayos)
     ok &= verificar_rollout(args.rutas, 3, 15, 5)
+    # El rollout, otra vez con las ondas activas: la entrada la construyen dos
+    # trozos de código distintos (politica.vector_entrada y
+    # vectorizado.entradas_instante) y el bloque nuevo tiene que salir igual en
+    # los dos, o la nota del barrido no mediría la red que se entrenó.
+    ok &= verificar_rollout(args.rutas, 3, 15, 5, args.n_f_max)
+    if args.con_rayos:
+        # Y con RAYOS: el rollout los traza contra el mapa en cada paso y el
+        # dataset los saca de las poses guardadas. Son dos caminos distintos
+        # hacia el mismo numero, y tienen que dar exactamente el mismo.
+        ok &= verificar_rollout(args.rutas, 3, 15, 5, 0, 12)
     print("\nRESULTADO:", "todo equivalente" if ok else "HAY DIFERENCIAS")
     sys.exit(0 if ok else 1)
 

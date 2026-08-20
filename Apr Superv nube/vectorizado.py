@@ -55,17 +55,28 @@ def ang_norm(a):
 # --------------------------------------------------------------------------- #
 # Trazado del superset: qué columnas ocupa cada bloque y cuáles usa cada config
 # --------------------------------------------------------------------------- #
-def dim_super(n_vec_max, h_max):
-    return (DIM_EGO + DIM_META + 2 * h_max + DIM_VECINO * n_vec_max + DIM_CTX)
+def dim_super(n_vec_max, h_max, n_f_max=0, con_rayos=False):
+    import rayos
+    return (DIM_EGO + DIM_META + 2 * h_max + DIM_VECINO * n_vec_max + DIM_CTX
+            + pol.DIM_FOURIER * n_f_max
+            + (rayos.ancho_superset() if con_rayos else 0))
 
 
-def columnas_vista(n_vec, h_pasado, n_vec_max, h_max):
+def columnas_vista(n_vec, h_pasado, n_vec_max, h_max, n_fourier=0, n_f_max=0,
+                   n_rayos=0, con_rayos=False):
     """Índices de las columnas del superset que forman la entrada de una
-    representación (n_vec, h_pasado). El resultado tiene exactamente la longitud
-    y el orden que espera `politica.crear_red` para esa configuración."""
-    if n_vec > n_vec_max or h_pasado > h_max:
-        raise ValueError(f"la vista ({n_vec}, {h_pasado}) no cabe en el superset "
-                         f"({n_vec_max}, {h_max})")
+    representación (n_vec, h_pasado, n_fourier). El resultado tiene exactamente
+    la longitud y el orden que espera `politica.crear_red` para esa
+    configuración.
+
+    El bloque de Fourier va agrupado por longitud de onda y de la más FINA a la
+    más gruesa, así que quedarse con las 4·n_fourier primeras columnas equivale
+    a usar solo las ondas más finas. Es lo que se quiere al recortar: lo que
+    aporta el bloque es el detalle local, porque la posición global ya está en
+    el vector en las x e y crudas."""
+    if n_vec > n_vec_max or h_pasado > h_max or n_fourier > n_f_max:
+        raise ValueError(f"la vista ({n_vec}, {h_pasado}, {n_fourier}) no cabe "
+                         f"en el superset ({n_vec_max}, {h_max}, {n_f_max})")
     cols = list(range(DIM_EGO + DIM_META))                # ego + meta
     base_pas = DIM_EGO + DIM_META
     # Historia alineada a la DERECHA: las 2·h_pasado últimas columnas del bloque.
@@ -74,6 +85,17 @@ def columnas_vista(n_vec, h_pasado, n_vec_max, h_max):
     cols += list(range(base_vec, base_vec + DIM_VECINO * n_vec))
     base_ctx = base_vec + DIM_VECINO * n_vec_max
     cols += list(range(base_ctx, base_ctx + DIM_CTX))
+    base_f = base_ctx + DIM_CTX
+    cols += list(range(base_f, base_f + pol.DIM_FOURIER * n_fourier))
+    # Rayos: el superset guarda los TRES conjuntos (8, 12 y 18) seguidos, porque
+    # no se derivan unos de otros —ocho direcciones repartidas por la
+    # circunferencia no son un subconjunto de dieciocho—. Aquí se coge el tramo
+    # que le toca a esta configuración.
+    if con_rayos and n_rayos:
+        import rayos
+        base_r = base_f + pol.DIM_FOURIER * n_f_max
+        ini, fin = rayos.tramo(n_rayos)
+        cols += list(range(base_r + ini, base_r + fin))
     return np.asarray(cols, dtype=np.int64)
 
 
@@ -190,7 +212,8 @@ def bloque_ctx(opt, n_veh, M):
 # --------------------------------------------------------------------------- #
 # Muestras de un run completo (todas las filas del CSV de un escenario)
 # --------------------------------------------------------------------------- #
-def superset_run(conds, opt, datos, n_vec_max, h_max, hor_max):
+def superset_run(conds, opt, datos, n_vec_max, h_max, hor_max, n_f_max=0,
+                 mapa_rayos=None):
     """Muestras de un escenario en la representación MÁXIMA.
 
     'conds' y 'datos' son los que devuelve `entrenar.leer_runs`. Devuelve
@@ -199,7 +222,7 @@ def superset_run(conds, opt, datos, n_vec_max, h_max, hor_max):
     vids = [vid for vid in datos if vid in conds]
     V = len(vids)
     if V == 0:
-        d = dim_super(n_vec_max, h_max)
+        d = dim_super(n_vec_max, h_max, n_f_max, mapa_rayos is not None)
         return (np.zeros((0, d), np.float32), np.zeros((0, n_vec_max), np.float32),
                 np.zeros((0, 2 * pol.N_PRED), np.float32))
 
@@ -267,7 +290,14 @@ def superset_run(conds, opt, datos, n_vec_max, h_max, hor_max):
             tc = np.full((n, n_vec_max), np.inf)
 
         ctx = bloque_ctx(opt, V, n)
-        Xs.append(np.concatenate([em, pas, vec, ctx], axis=1))
+        bloques = [em, pas, vec, ctx]
+        if n_f_max > 0:
+            bloques.append(pol.rasgos_fourier(x, y, n_f_max))
+        if mapa_rayos is not None:
+            import rayos
+            (oc, _obb), mundo_r = mapa_rayos
+            bloques.append(rayos.bloque_superset(x, y, th, oc, mundo_r))
+        Xs.append(np.concatenate(bloques, axis=1))
         TCs.append(tc)
 
         # Objetivo: los N_PRED controles siguientes, normalizados; pasado el final
@@ -294,7 +324,7 @@ def superset_run(conds, opt, datos, n_vec_max, h_max, hor_max):
 # Entradas de un INSTANTE para varias flotas a la vez (despliegue / rollout)
 # --------------------------------------------------------------------------- #
 def entradas_instante(est, par, idx_otros, valido, ctx, n_vec_max, hor_max,
-                      pasado):
+                      pasado, n_f_max=0, n_rayos=0, mapa_rayos=None):
     """Vector de entrada de TODOS los vehículos (M) en un instante.
 
     'est' (M, 4) es (x, y, θ, v); 'par' un dict de arrays (M,) con los
@@ -318,7 +348,14 @@ def entradas_instante(est, par, idx_otros, valido, ctx, n_vec_max, hor_max,
         de_otros(par["v_max"]), de_otros(par["largo"]), de_otros(par["ancho"]),
         de_otros(par["grupo"]), de_otros(par["prioridad"]),
         valido, n_vec_max, hor_max)
-    return np.concatenate([em, pas, vec, ctx], axis=1).astype(np.float32), tc
+    bloques = [em, pas, vec, ctx]
+    if n_f_max > 0:
+        bloques.append(pol.rasgos_fourier(x, y, n_f_max))
+    if n_rayos and mapa_rayos is not None:
+        import rayos
+        (oc, _obb), mundo_r = mapa_rayos
+        bloques.append(rayos.distancias(x, y, th, n_rayos, oc, mundo_r))
+    return np.concatenate(bloques, axis=1).astype(np.float32), tc
 
 
 # --------------------------------------------------------------------------- #
@@ -493,7 +530,8 @@ def _preparar(flotas, opts, h_pasado):
 
 def rollout(flotas, politica, t_max=pol.T_MAX, opts=None, n_vec=None,
             horizonte=None, h_pasado=None, guardar_traj=False,
-            obstaculos=None, mundo=None, cada=2):
+            obstaculos=None, mundo=None, cada=2, n_fourier=None,
+            n_rayos=None, refresco=None):
     """Simula todas las flotas con la política. Escribe veh.traj, veh.mision_ok y
     veh.choque, y devuelve el nº de llegados por flota, igual que
     rollout_multiflota. Por defecto veh.traj guarda solo la pose inicial y la
@@ -517,6 +555,20 @@ def rollout(flotas, politica, t_max=pol.T_MAX, opts=None, n_vec=None,
     n_vec = pol.N_VECINOS if n_vec is None else n_vec
     horizonte = pol.HORIZONTE_VECINO if horizonte is None else horizonte
     h_pasado = pol.H_PASADO if h_pasado is None else h_pasado
+    n_fourier = pol.N_FOURIER if n_fourier is None else int(n_fourier)
+    n_rayos = pol.N_RAYOS if n_rayos is None else int(n_rayos)
+    # Cada cuántos pasos se vuelve a preguntar a la red. Por defecto N_PRED: se
+    # pide un plan de diez y se ejecutan los diez, o sea que el vehículo conduce
+    # UN SEGUNDO a ciegas —hasta 2,8 m a velocidad de crucero, cuando el margen
+    # con el que conduce el planificador es de 10-20 cm—. Con un refresco menor
+    # se aprovechan solo los primeros pasos del plan y el resto se tira, que es
+    # lo que hace un control con horizonte deslizante.
+    refresco = pol.N_PRED if refresco is None else max(1, min(int(refresco),
+                                                              pol.N_PRED))
+    # Los rayos se trazan contra el mapa fijo, que es el mismo que ya se pasa
+    # para mirar los choques. Si no se pasa mapa no hay rayos que valgan.
+    mapa_r = ((obstaculos, mundo) if (n_rayos and obstaculos is not None
+                                      and mundo is not None) else None)
 
     vehs, est, par, idx_otros, valido, ctx, pasado = _preparar(
         flotas, opts, h_pasado)
@@ -525,6 +577,16 @@ def rollout(flotas, politica, t_max=pol.T_MAX, opts=None, n_vec=None,
         return [0] * len(flotas)
     llegado = np.zeros(M, dtype=bool)
     choque = np.zeros(M, dtype=bool)
+    # Cuántas comprobaciones lleva cada vehículo tocando algo. No basta con un
+    # sí/no: el planificador clásico conduce con 10-20 cm de holgura, así que
+    # CUALQUIER red que se desvíe un palmo choca, y con una bandera todas
+    # empatarían en "chocó" sin poder distinguir a la que roza un instante de la
+    # que se pasa el trayecto dentro de un muro.
+    pasos_choque = np.zeros(M, dtype=np.int32)
+    # Comprobaciones en las que el vehiculo seguia circulando. Sirve para pasar
+    # de "segundos tocando" a "fraccion del trayecto tocando", que es lo unico
+    # comparable entre un vehiculo que llega en 20 s y otro que da vueltas 300.
+    pasos_activo = np.zeros(M, dtype=np.int32)
     mirar_choques = mundo is not None
     planes = np.zeros((M, pol.N_PRED, 2))
     camino = [est[:, :3].copy()] if guardar_traj else None
@@ -533,12 +595,14 @@ def rollout(flotas, politica, t_max=pol.T_MAX, opts=None, n_vec=None,
         activo = ~llegado
         if not activo.any():
             break
-        if paso % pol.N_PRED == 0:
+        if paso % refresco == 0:
             obs, _ = entradas_instante(est, par, idx_otros, valido, ctx,
-                                       n_vec, horizonte, pasado)
+                                       n_vec, horizonte, pasado, n_fourier,
+                                       n_rayos, mapa_r)
             planes[activo] = politica.predecir_lote(obs[activo])
 
-        a_n, g_n = planes[:, paso % pol.N_PRED, 0], planes[:, paso % pol.N_PRED, 1]
+        j = paso % refresco
+        a_n, g_n = planes[:, j, 0], planes[:, j, 1]
         a = np.clip(a_n, -1.0, 1.0) * par["a_max"]
         giro = np.clip(g_n, -1.0, 1.0) * par["giro_max"]
         x, y, th, v = est[:, 0], est[:, 1], est[:, 2], est[:, 3]
@@ -567,12 +631,15 @@ def rollout(flotas, politica, t_max=pol.T_MAX, opts=None, n_vec=None,
         # se separen. No se altera la física —el vehículo sigue su camino— para
         # no cambiar lo que ven los demás; lo que cambia es su nota.
         if mirar_choques and paso % cada == 0:
-            por_mirar = ~choque
-            if por_mirar.any():
-                choque |= choques_entre_vehiculos(est, par, idx_otros, valido,
-                                                  por_mirar)
-                choque |= choques_con_mapa(est, par, obstaculos, mundo,
-                                           por_mirar)
+            # Se miran TODOS los que siguen circulando, no solo los que aún no
+            # han chocado: hay que contar cuánto tiempo pasa cada uno tocando.
+            ahora_choca = (choques_entre_vehiculos(est, par, idx_otros, valido,
+                                                   activo)
+                           | choques_con_mapa(est, par, obstaculos, mundo,
+                                              activo))
+            choque |= ahora_choca
+            pasos_choque += ahora_choca
+            pasos_activo += activo
 
         if guardar_traj:
             camino.append(est[:, :3].copy())
@@ -586,6 +653,10 @@ def rollout(flotas, politica, t_max=pol.T_MAX, opts=None, n_vec=None,
         veh.dt_plan = DT
         veh.mision_ok = bool(llegado[m])
         veh.choque = bool(choque[m])
+        # Segundos que ha pasado tocando algo (cada comprobación cubre
+        # 'cada' pasos de DT).
+        veh.seg_choque = float(pasos_choque[m] * cada * DT)
+        veh.seg_activo = float(pasos_activo[m] * cada * DT)
 
     llegados, base = [], 0
     for flota in flotas:

@@ -36,9 +36,14 @@ MARGEN = {"i": 62, "d": 24, "arr": 24, "ab": 46}
 
 
 # Minutos de pruebas que entran en cada punto de la media. Solo las que entrenan
-# enteras tienen nota, así que la ventana tiene que dar para varias: con el
-# abandono bajado a la mitad caen unas cinco en cinco minutos.
-SUAVIZADO_MIN = 5.0
+# enteras tienen nota, así que la ventana tiene que dar para varias.
+#
+# 25 y no 5: con 5 la media saltaba casi tanto como las notas sueltas, que es
+# justo lo que la media tiene que quitar. Las configuraciones tardan entre 5 y
+# 47 minutos según el tamaño de la red, así que una ventana corta a veces
+# contenía una sola prueba y otras ninguna. Con 25 entran varias siempre y la
+# línea dice lo que debe: si el buscador está encontrando mejores sitios o no.
+SUAVIZADO_MIN = 25.0
 
 
 def media_suavizada(puntos, ventana_min=SUAVIZADO_MIN):
@@ -139,6 +144,79 @@ def _trazar(puntos, mejores, medias, t_max, y_min, y_max, ini=None,
     return "\n".join(partes)
 
 
+# Minutos SIN NINGUNA prueba en marcha a partir de los cuales se considera que
+# la búsqueda estaba parada, no lenta.
+#
+# Ojo a qué es un hueco: NO es el rato desde la última prueba terminada, sino el
+# rato en que no había ninguna corriendo. Una red grande entrenando 45 minutos
+# cubre su intervalo entero y no abre hueco ninguno, y con tres trabajadores
+# solapándose haría falta que cayeran los tres a la vez. Por eso 50 va sobrado:
+# solo se recortan paradas de verdad —el ordenador apagado, o la búsqueda
+# detenida a mano—, y aun así queda margen para un relanzamiento lento tras una
+# caída del driver.
+PARADA_MIN = 50.0
+
+
+def _reloj_efectivo(reales, ahora):
+    """Función que convierte un instante real en MINUTOS DE BÚSQUEDA, saltándose
+    los ratos en que no había nada corriendo.
+
+    Sin esto, apagar el ordenador por la noche mete ocho horas de línea plana en
+    el gráfico y parece un estancamiento enorme cuando en realidad no se estaba
+    buscando. Lo que interesa ver es el avance POR ESFUERZO, no por reloj.
+
+    Se toman los intervalos (arranque, fin) de todas las pruebas, se fusionan
+    los que se solapan —hay tres trabajadores a la vez— y los huecos que quedan
+    por encima de PARADA_MIN se descuentan enteros."""
+    tramos = sorted((t.datetime_start, t.datetime_complete) for t in reales
+                    if t.datetime_start and t.datetime_complete)
+    if not tramos:
+        return (lambda x: 0.0), []
+    fund = [list(tramos[0])]
+    for a, b in tramos[1:]:
+        if a <= fund[-1][1]:
+            fund[-1][1] = max(fund[-1][1], b)
+        else:
+            fund.append([a, b])
+
+    # Descuento acumulado hasta el comienzo de cada tramo de actividad.
+    cortes, desc, acum = [], [], 0.0
+    for i, (a, b) in enumerate(fund):
+        if i:
+            hueco = (a - fund[i - 1][1]).total_seconds() / 60.0
+            if hueco > PARADA_MIN:
+                acum += hueco
+        cortes.append(a)
+        desc.append(acum)
+    ini = fund[0][0]
+
+    fin_ultima = fund[-1][1]
+
+    def efectivo(cuando):
+        d = 0.0
+        for c, k in zip(cortes, desc):
+            if cuando >= c:
+                d = k
+            else:
+                break
+        # El hueco que va desde la última prueba hasta AHORA cuenta igual que
+        # los de en medio. Sin esto, parar la búsqueda dejaba el gráfico
+        # estirándose solo: la línea seguía avanzando hacia la derecha, plana,
+        # como si llevara horas sin encontrar nada cuando simplemente no estaba
+        # buscando. Es el caso más visible de todos, porque es el que se mira.
+        cola = (cuando - fin_ultima).total_seconds() / 60.0
+        if cola > PARADA_MIN:
+            d += cola
+        return max(0.0, (cuando - ini).total_seconds() / 60.0 - d)
+
+    paradas = []
+    for i in range(1, len(fund)):
+        hueco = (fund[i][0] - fund[i - 1][1]).total_seconds() / 60.0
+        if hueco > PARADA_MIN:
+            paradas.append(hueco)
+    return efectivo, paradas
+
+
 def construir(estudio, salida, refresco, objetivo=4800,
               suavizado=SUAVIZADO_MIN):
     from optuna.trial import TrialState
@@ -155,6 +233,9 @@ def construir(estudio, salida, refresco, objetivo=4800,
 
     ini = min((t.datetime_start for t in reales), default=None)
     ahora = dt.datetime.now()
+    # El eje X va en minutos de BÚSQUEDA, no de reloj: los ratos con el
+    # ordenador apagado se recortan (ver _reloj_efectivo).
+    efectivo, paradas = _reloj_efectivo(reales, ahora)
 
     puntos, mejores = [], []
     mejor = max((t.value for t in siembra), default=None)
@@ -163,13 +244,13 @@ def construir(estudio, salida, refresco, objetivo=4800,
     for t in sorted(reales, key=lambda x: x.datetime_complete):
         if t.state != TrialState.COMPLETE or t.value is None:
             continue
-        tm = (t.datetime_complete - ini).total_seconds() / 60.0
+        tm = efectivo(t.datetime_complete)
         puntos.append((tm, t.value))
         if mejor is None or t.value > mejor:
             mejor = t.value
             mejores.append((tm, mejor))
 
-    t_max = ((ahora - ini).total_seconds() / 60.0) if ini else 1.0
+    t_max = efectivo(ahora) if ini else 1.0
     completas = [t for t in reales if t.state == TrialState.COMPLETE]
     # Dos cosas muy distintas que Optuna mete en el mismo saco:
     #   · CORTADAS pronto — iban peor que las demás y no se les dio más tiempo.
@@ -184,8 +265,9 @@ def construir(estudio, salida, refresco, objetivo=4800,
     podadas = [t for t in sin_acabar if not t.user_attrs.get("fallo")]
 
     # Ritmo de la última hora (o de todo si lleva menos).
-    corte = ahora - dt.timedelta(hours=1)
-    ult = [t for t in reales if t.datetime_complete >= corte]
+    # Ritmo: también en tiempo efectivo, o tras una noche apagado saldría un
+    # ritmo de cero y la estimación de lo que falta se iría a infinito.
+    ult = [t for t in reales if t_max - efectivo(t.datetime_complete) <= 60.0]
     minutos = min(60.0, t_max) or 1.0
     ritmo = len(ult) / (minutos / 60.0)
 

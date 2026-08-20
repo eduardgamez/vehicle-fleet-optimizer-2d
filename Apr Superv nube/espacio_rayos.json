@@ -1,0 +1,91 @@
+{
+ "n_capas": [
+  2,
+  3,
+  4,
+  6
+ ],
+ "oculto": [
+  256,
+  512,
+  1024,
+  2048,
+  4096
+ ],
+ "dropout": [
+  0.0,
+  0.1,
+  0.2,
+  0.35
+ ],
+ "activacion": [
+  "relu",
+  "gelu",
+  "silu"
+ ],
+ "lr": [
+  0.001,
+  0.003,
+  0.008,
+  0.02
+ ],
+ "lote": [
+  512,
+  2048,
+  8192,
+  16384
+ ],
+ "n_vecinos": [
+  3,
+  4,
+  5,
+  7
+ ],
+ "h_pasado": [
+  1,
+  2,
+  3,
+  5,
+  10,
+  15,
+  20
+ ],
+ "horizonte": [
+  10,
+  15,
+  20,
+  30
+ ],
+ "epocas": [
+  80
+ ],
+ "weight_decay": [
+  0.0,
+  0.01,
+  0.1
+ ],
+ "normalizacion": [
+  "no",
+  "layernorm"
+ ],
+ "optimizador": [
+  "adamw",
+  "sgd"
+ ],
+ "mezcla": [
+  "natural",
+  "cap_rec",
+  "raros_x2",
+  "raros_x4"
+ ],
+ "n_fourier": [
+  0,
+  6,
+  12
+ ],
+ "n_rayos": [
+  8,
+  12,
+  18
+ ]
+}
