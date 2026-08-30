@@ -265,7 +265,12 @@ def crear_manejador(sup, args):
 
 def main():
     ap = argparse.ArgumentParser(description="Panel de control de la búsqueda.")
-    ap.add_argument("--puerto", type=int, default=8770)
+    # 8771 y no 8770: el panel de la FASE 1 arranca solo al iniciar sesión (hay
+    # un acceso directo en shell:startup) y se queda con el 8770. Compartiendo
+    # puerto, quien abriera localhost:8770 creyendo ver la fase 2 estaba viendo
+    # la fase 1, y darle a "Arrancar" lanzaba el barrido aleatorio en vez de
+    # Optuna. Pasó dos veces.
+    ap.add_argument("--puerto", type=int, default=8771)
     # 3 procesos, no 4: con más se cae el driver de la tarjeta (eventos
     # nvlddmkm 153) y se lleva por delante la tanda entera. Con 3 y un 27 % de
     # memoria cada uno aguanta horas, y la tarjeta ya llega al 98 %, así que el

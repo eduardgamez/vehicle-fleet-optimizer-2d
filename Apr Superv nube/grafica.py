@@ -38,17 +38,20 @@ MARGEN = {"i": 62, "d": 24, "arr": 24, "ab": 46}
 # Minutos de pruebas que entran en cada punto de la media. Solo las que entrenan
 # enteras tienen nota, así que la ventana tiene que dar para varias.
 #
-# 25 y no 5: con 5 la media saltaba casi tanto como las notas sueltas, que es
-# justo lo que la media tiene que quitar. Las configuraciones tardan entre 5 y
-# 47 minutos según el tamaño de la red, así que una ventana corta a veces
-# contenía una sola prueba y otras ninguna. Con 25 entran varias siempre y la
-# línea dice lo que debe: si el buscador está encontrando mejores sitios o no.
-SUAVIZADO_MIN = 25.0
+# Una hora, no los cinco minutos de antes: con la ventana corta la media
+# saltaba casi tanto como las notas sueltas, que es justo lo que tiene que
+# quitar. Las configuraciones tardan entre 5 y 47 minutos según el tamaño de la
+# red, y al doblar el presupuesto a 160 épocas el ritmo cayó a unas seis pruebas
+# útiles por hora: con menos de una hora, la ventana se quedaba a ratos con una
+# sola prueba dentro, que es como no promediar nada.
+# 90 min desde el 22/08/2026: con una hora la línea seguía haciendo zigzag y no
+# dejaba ver si la media SUBE, que es lo único que se le pide.
+SUAVIZADO_MIN = 90.0
 
 
 def media_suavizada(puntos, ventana_min=SUAVIZADO_MIN):
-    """Nota MEDIA de las pruebas de los últimos 'ventana_min' minutos, punto a
-    punto.
+    """Nota media PONDERADA de las pruebas de los últimos 'ventana_min' minutos,
+    punto a punto. Las recientes pesan más.
 
     Es el segundo indicador de que la búsqueda va bien: la línea del mejor solo
     puede subir (basta un golpe de suerte), pero la media sube únicamente si el
@@ -56,17 +59,29 @@ def media_suavizada(puntos, ventana_min=SUAVIZADO_MIN):
     mejor: si lo hiciera, sería que ha dejado de explorar.
 
     La ventana es de TIEMPO y no de número de pruebas, y se desliza en vez de ir
-    a saltos: así la línea no pega botes cada vez que entra una candidata mala,
-    y sigue significando lo mismo aunque el ritmo cambie."""
+    a saltos, así sigue significando lo mismo aunque cambie el ritmo.
+
+    El peso cae en línea recta desde 1 en el punto actual hasta 0 en el borde de
+    la ventana. Con peso uniforme la línea daba un salto cada vez que una prueba
+    salía por detrás —cuanto más grande su nota, mayor el bote—, y ese salto no
+    significaba nada: era una prueba de hace una hora dejando de contar. Con el
+    peso a cero en el borde, salen sin que se note, y lo que manda es lo último
+    que ha propuesto el buscador, que es lo que se quiere mirar."""
     if not puntos or ventana_min <= 0:
         return []
-    salida, ini, suma = [], 0, 0.0
-    for i, (t, v) in enumerate(puntos):
-        suma += v
+    salida, ini = [], 0
+    for i, (t, _v) in enumerate(puntos):
         while puntos[ini][0] < t - ventana_min:   # sale lo que ya no cae dentro
-            suma -= puntos[ini][1]
             ini += 1
-        salida.append((t, suma / (i - ini + 1)))
+        num = den = 0.0
+        for j in range(ini, i + 1):
+            tj, vj = puntos[j]
+            w = 1.0 - (t - tj) / ventana_min      # 1 aquí mismo, 0 en el borde
+            if w <= 0.0:
+                continue
+            num += w * vj
+            den += w
+        salida.append((t, num / den if den else _v))
     return salida
 
 
@@ -293,8 +308,9 @@ def construir(estudio, salida, refresco, objetivo=4800,
     y_max = max(max(valores), mejor or 0) * 1.02
     y_min = min(min(valores), 0.0)
 
-    abandonos = sorted((t.datetime_complete - ini).total_seconds() / 60.0
-                       for t in podadas)
+    # En tiempo EFECTIVO, igual que los puntos y el eje. Con el reloj se
+    # dibujaban más allá del borde derecho y desaparecían del gráfico.
+    abandonos = sorted(efectivo(t.datetime_complete) for t in podadas)
     medias = media_suavizada(puntos, suavizado)
     grafico = _trazar(puntos, mejores, medias, max(t_max, 1.0), y_min, y_max,
                       ini, abandonos)
@@ -308,12 +324,17 @@ def construir(estudio, salida, refresco, objetivo=4800,
     tarjetas = "".join([
         # Al pie, el récord ANTERIOR: así se ve de un vistazo cuánto ha subido
         # el último salto, y cambia solo cada vez que se bate la marca.
+        #
+        # Con un solo escalón NO se puede decir de dónde viene la marca: un
+        # estudio que hereda al anterior arranca con el récord ya puesto, y
+        # ponía "aún sin superar la fase 1" cuando la mejor nota era justamente
+        # de la fase 2. Mejor no afirmar nada que no se sepa.
         tarjeta("Mejor nota", mejor_txt,
                 (f"antes {mejores[-2][1]:.4f}" if len(mejores) > 1
-                 else "aún sin superar la fase 1")),
-        tarjeta("Media reciente", f"{medias[-1][1]:.3f}" if medias else "—",
-                (f"últimos {suavizado:.0f} min" if medias
-                 else "esperando pruebas")),
+                 else "sin récord anterior con el que comparar")),
+        # La media ya se ve en el gráfico, como línea. De tarjeta sobraba: un
+        # número suelto sin su historia no dice si sube o baja, que es lo único
+        # que interesa de la media.
         tarjeta("Sin mejorar", f"{sin_mejora/60:.1f} h", "desde el último récord"),
         tarjeta("Falta", eta_txt, eta_pie),
         # Para el objetivo cuentan TODAS las candidatas exploradas, enteras o
@@ -384,7 +405,7 @@ Se para entre 3.000 y 5.000 pruebas, cuando ambas se hayan aplanado.</div>
 def main():
     ap = argparse.ArgumentParser(description="Gráfica en directo de la búsqueda.")
     ap.add_argument("--bd", default=None)
-    ap.add_argument("--estudio", default="tdr_flota_v2")
+    ap.add_argument("--estudio", default="tdr_flota_v4")
     ap.add_argument("--salida", default=None,
                     help="def. modelos/avance.html")
     ap.add_argument("--refresco", type=int, default=30,

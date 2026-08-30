@@ -97,7 +97,14 @@ ESPACIO["n_fourier"] = [0, 6, 12]
 # se lanza SIN él (--espacio con solo 8, 12 y 18): las 241 configuraciones ya
 # evaluadas son el grupo de control con 0 rayos, así que repetirlo sería gastar
 # pruebas en algo que ya está medido.
-ESPACIO["n_rayos"] = [0, 8, 12, 18]
+#
+# 22, 27 y 32 se añaden el 22/08/2026 porque el eje salió PEGADO AL TOPE (ver
+# rayos.CONJUNTOS). Los valores viejos NO se retiran: son las 848 pruebas que
+# ya tienen nota y con las que el muestreador sabe lo que sabe, y borrarlos del
+# espacio las tiraría a la basura. Lo que cambia es qué se prueba a partir de
+# ahora: buscar_optuna.N_RAYOS_NUEVOS fija los rayos de cada candidata nueva en
+# 22, 27 o 32, y el superset solo guarda esos tres más el 18 del campeón.
+ESPACIO["n_rayos"] = [0, 8, 12, 18, 22, 27, 32]
 
 CAMPOS = ["nota_seleccion" if c == "nota_rollout" else c for c in CAMPOS_EXTRA]
 CAMPOS += ["epocas_hechas", "pct_choque", "pct_llegada", "seg_choque"]
@@ -376,7 +383,8 @@ def entrenar_config(V, datos, c, device, criba=None, enfasis=1.0, aviso=None):
     lote = int(c["lote"])
     red = crear_red(V.shape[1], c["oculto"], pol.N_PRED, c["n_capas"],
                     c["dropout"], c["activacion"],
-                    c.get("normalizacion", "no")).to(device)
+                    c.get("normalizacion", "no"),
+                    c.get("residual", False)).to(device)
     if c.get("optimizador", "adamw") == "sgd":
         opt = torch.optim.SGD(red.parameters(),
                               lr=c["lr"] * ent.FACTOR_LR_SGD, momentum=0.9,
@@ -782,7 +790,11 @@ def guardar_mejor(salida, idt, mejor):
     aleatoria se perdió así, y hubo que reentrenarla desde el registro."""
     import torch
     nota, val, c, media, escala, estado, dim = mejor
-    ruta = os.path.join(salida, f"mejor_t{idt:03d}.pt")
+    # El identificador de la tarea suele ser el número del trabajador, pero la
+    # fase 3 nombra sus modelos por configuración y semilla; de ahí que se acepte
+    # también un texto.
+    etiqueta = f"t{idt:03d}" if isinstance(idt, int) else str(idt)
+    ruta = os.path.join(salida, f"mejor_{etiqueta}.pt")
     if os.path.exists(ruta):
         try:
             previa = torch.load(ruta, map_location="cpu",
@@ -796,7 +808,8 @@ def guardar_mejor(salida, idt, mejor):
                                   c.get("n_rayos", 0))
     arq = {"oculto": c["oculto"], "n_capas": c["n_capas"],
            "dropout": c["dropout"], "activacion": c["activacion"],
-           "normalizacion": c.get("normalizacion", "no")}
+           "normalizacion": c.get("normalizacion", "no"),
+           "residual": c.get("residual", False)}
     cfg = ent._cfg(arq, nota, val)
     cfg["hiperparametros"] = {k: c[k] for k in c}
     ent._guardar(ruta, cfg, media, escala, estado)

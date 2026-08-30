@@ -59,12 +59,24 @@ N_ANGULOS = 120
 # unos 8 largos de vehículo.
 D_MAX = 8.0
 
-# Números de rayos que puede usar una configuración. El superset guarda LOS
-# TRES conjuntos, uno detrás de otro, y cada punto del barrido se queda con el
+# Números de rayos que puede usar una configuración. El superset guarda TODOS
+# los conjuntos, uno detrás de otro, y cada punto del barrido se queda con el
 # suyo. No se puede recortar como se hace con las ondas —quedarse con los
 # primeros—: ocho rayos repartidos por la circunferencia no son un subconjunto
 # de dieciocho, son direcciones distintas.
-CONJUNTOS = (8, 12, 18)
+#
+# 22/27/32 desde el 22/08/2026. De los 15 ejes del espacio, este era el ÚNICO
+# pegado al tope: entre las 848 pruebas con nota, la media sube monótona con el
+# nº de rayos (0,027 · 0,040 · 0,044 · 0,052 para 0/8/12/18) y 18 se lleva el
+# 84 % del top-25. Un eje que nunca se aplana es un eje que se queda corto, así
+# que el intervalo se desplaza hacia arriba en vez de ampliarse por abajo.
+#
+# 8 y 12 SALEN del superset: sus pruebas ya están hechas y siguen sembrando el
+# muestreador, pero nadie va a volver a entrenar ahí. 18 se queda porque es el
+# nº del campeón actual (nota 0,1118) y hay que poder reentrenarlo o rematar
+# sus candidatas a medias. Cada conjunto que se guarda cuesta una columna por
+# rayo en el superset y esa memoria se paga en la tarjeta.
+CONJUNTOS = (18, 22, 27, 32)
 
 CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "modelos",
                      "tabla_rayos.npz")
@@ -209,7 +221,7 @@ def distancias(x, y, th, n_rayos, oc, mundo, verbose=False):
 
 
 def bloque_superset(x, y, th, oc, mundo, verbose=False):
-    """Los tres conjuntos de rayos, uno detrás de otro (8, luego 12, luego 18).
+    """Todos los conjuntos de rayos, uno detrás de otro (ver CONJUNTOS).
 
     El superset los guarda todos porque no se pueden derivar unos de otros, y
     cada configuración del barrido se queda con el tramo que le toca."""

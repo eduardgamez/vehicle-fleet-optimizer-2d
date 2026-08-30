@@ -1,0 +1,555 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 420" width="1000" height="420">
+<style>
+  .abandono { stroke: #6b7280; stroke-width: 1.4; opacity: .7; }
+  .eje { fill: #6b7280; font: 11px system-ui, sans-serif; }
+  .media { fill: none; stroke: #f59e0b; stroke-width: 1.8; stroke-dasharray: 5 4; }
+  .mejor { fill: none; stroke: #4ade80; stroke-width: 2.2; }
+  .punta { fill: #4ade80; }
+  .punto { fill: #6ea8fe; opacity: .45; }
+  .rejilla { stroke: #262a33; stroke-width: 1; }
+</style>
+<rect x="0" y="0" width="1000" height="420" fill="#11131a"/>
+<line x1="62" y1="374.0" x2="976" y2="374.0" class="rejilla"/>
+<text x="52" y="378.0" class="eje" text-anchor="end">0.00</text>
+<line x1="62" y1="304.0" x2="976" y2="304.0" class="rejilla"/>
+<text x="52" y="308.0" class="eje" text-anchor="end">0.02</text>
+<line x1="62" y1="234.0" x2="976" y2="234.0" class="rejilla"/>
+<text x="52" y="238.0" class="eje" text-anchor="end">0.05</text>
+<line x1="62" y1="164.0" x2="976" y2="164.0" class="rejilla"/>
+<text x="52" y="168.0" class="eje" text-anchor="end">0.07</text>
+<line x1="62" y1="94.0" x2="976" y2="94.0" class="rejilla"/>
+<text x="52" y="98.0" class="eje" text-anchor="end">0.09</text>
+<line x1="62" y1="24.0" x2="976" y2="24.0" class="rejilla"/>
+<text x="52" y="28.0" class="eje" text-anchor="end">0.11</text>
+<line x1="62.0" y1="24" x2="62.0" y2="374" class="rejilla"/>
+<text x="62.0" y="394" class="eje" text-anchor="middle">09:51</text>
+<text x="62.0" y="408" class="eje tenue" text-anchor="middle">0 min</text>
+<line x1="279.8" y1="24" x2="279.8" y2="374" class="rejilla"/>
+<text x="279.8" y="394" class="eje" text-anchor="middle">15:51</text>
+<text x="279.8" y="408" class="eje tenue" text-anchor="middle">6 h</text>
+<line x1="497.6" y1="24" x2="497.6" y2="374" class="rejilla"/>
+<text x="497.6" y="394" class="eje" text-anchor="middle">21:51</text>
+<text x="497.6" y="408" class="eje tenue" text-anchor="middle">12 h</text>
+<line x1="715.5" y1="24" x2="715.5" y2="374" class="rejilla"/>
+<text x="715.5" y="394" class="eje" text-anchor="middle">03:51</text>
+<text x="715.5" y="408" class="eje tenue" text-anchor="middle">18 h</text>
+<line x1="933.3" y1="24" x2="933.3" y2="374" class="rejilla"/>
+<text x="933.3" y="394" class="eje" text-anchor="middle">09:51</text>
+<text x="933.3" y="408" class="eje tenue" text-anchor="middle">24 h</text>
+<line x1="64.2" y1="368" x2="64.2" y2="374" class="abandono"/>
+<line x1="65.3" y1="368" x2="65.3" y2="374" class="abandono"/>
+<line x1="76.2" y1="368" x2="76.2" y2="374" class="abandono"/>
+<line x1="86.2" y1="368" x2="86.2" y2="374" class="abandono"/>
+<line x1="86.9" y1="368" x2="86.9" y2="374" class="abandono"/>
+<line x1="88.4" y1="368" x2="88.4" y2="374" class="abandono"/>
+<line x1="88.5" y1="368" x2="88.5" y2="374" class="abandono"/>
+<line x1="88.8" y1="368" x2="88.8" y2="374" class="abandono"/>
+<line x1="89.3" y1="368" x2="89.3" y2="374" class="abandono"/>
+<line x1="90.8" y1="368" x2="90.8" y2="374" class="abandono"/>
+<line x1="91.0" y1="368" x2="91.0" y2="374" class="abandono"/>
+<line x1="91.3" y1="368" x2="91.3" y2="374" class="abandono"/>
+<line x1="91.5" y1="368" x2="91.5" y2="374" class="abandono"/>
+<line x1="91.5" y1="368" x2="91.5" y2="374" class="abandono"/>
+<line x1="91.8" y1="368" x2="91.8" y2="374" class="abandono"/>
+<line x1="92.6" y1="368" x2="92.6" y2="374" class="abandono"/>
+<line x1="93.2" y1="368" x2="93.2" y2="374" class="abandono"/>
+<line x1="93.2" y1="368" x2="93.2" y2="374" class="abandono"/>
+<line x1="93.5" y1="368" x2="93.5" y2="374" class="abandono"/>
+<line x1="95.4" y1="368" x2="95.4" y2="374" class="abandono"/>
+<line x1="95.8" y1="368" x2="95.8" y2="374" class="abandono"/>
+<line x1="96.3" y1="368" x2="96.3" y2="374" class="abandono"/>
+<line x1="97.3" y1="368" x2="97.3" y2="374" class="abandono"/>
+<line x1="97.4" y1="368" x2="97.4" y2="374" class="abandono"/>
+<line x1="101.2" y1="368" x2="101.2" y2="374" class="abandono"/>
+<line x1="103.2" y1="368" x2="103.2" y2="374" class="abandono"/>
+<line x1="103.3" y1="368" x2="103.3" y2="374" class="abandono"/>
+<line x1="103.8" y1="368" x2="103.8" y2="374" class="abandono"/>
+<line x1="104.4" y1="368" x2="104.4" y2="374" class="abandono"/>
+<line x1="105.1" y1="368" x2="105.1" y2="374" class="abandono"/>
+<line x1="105.1" y1="368" x2="105.1" y2="374" class="abandono"/>
+<line x1="106.0" y1="368" x2="106.0" y2="374" class="abandono"/>
+<line x1="106.0" y1="368" x2="106.0" y2="374" class="abandono"/>
+<line x1="106.4" y1="368" x2="106.4" y2="374" class="abandono"/>
+<line x1="106.8" y1="368" x2="106.8" y2="374" class="abandono"/>
+<line x1="107.9" y1="368" x2="107.9" y2="374" class="abandono"/>
+<line x1="108.8" y1="368" x2="108.8" y2="374" class="abandono"/>
+<line x1="109.9" y1="368" x2="109.9" y2="374" class="abandono"/>
+<line x1="110.7" y1="368" x2="110.7" y2="374" class="abandono"/>
+<line x1="110.9" y1="368" x2="110.9" y2="374" class="abandono"/>
+<line x1="112.3" y1="368" x2="112.3" y2="374" class="abandono"/>
+<line x1="112.4" y1="368" x2="112.4" y2="374" class="abandono"/>
+<line x1="112.4" y1="368" x2="112.4" y2="374" class="abandono"/>
+<line x1="113.7" y1="368" x2="113.7" y2="374" class="abandono"/>
+<line x1="114.1" y1="368" x2="114.1" y2="374" class="abandono"/>
+<line x1="114.7" y1="368" x2="114.7" y2="374" class="abandono"/>
+<line x1="114.8" y1="368" x2="114.8" y2="374" class="abandono"/>
+<line x1="115.2" y1="368" x2="115.2" y2="374" class="abandono"/>
+<line x1="115.8" y1="368" x2="115.8" y2="374" class="abandono"/>
+<line x1="115.9" y1="368" x2="115.9" y2="374" class="abandono"/>
+<line x1="116.1" y1="368" x2="116.1" y2="374" class="abandono"/>
+<line x1="117.4" y1="368" x2="117.4" y2="374" class="abandono"/>
+<line x1="118.3" y1="368" x2="118.3" y2="374" class="abandono"/>
+<line x1="118.4" y1="368" x2="118.4" y2="374" class="abandono"/>
+<line x1="119.2" y1="368" x2="119.2" y2="374" class="abandono"/>
+<line x1="120.3" y1="368" x2="120.3" y2="374" class="abandono"/>
+<line x1="120.3" y1="368" x2="120.3" y2="374" class="abandono"/>
+<line x1="121.0" y1="368" x2="121.0" y2="374" class="abandono"/>
+<line x1="121.1" y1="368" x2="121.1" y2="374" class="abandono"/>
+<line x1="121.1" y1="368" x2="121.1" y2="374" class="abandono"/>
+<line x1="122.1" y1="368" x2="122.1" y2="374" class="abandono"/>
+<line x1="122.2" y1="368" x2="122.2" y2="374" class="abandono"/>
+<line x1="122.6" y1="368" x2="122.6" y2="374" class="abandono"/>
+<line x1="123.3" y1="368" x2="123.3" y2="374" class="abandono"/>
+<line x1="123.9" y1="368" x2="123.9" y2="374" class="abandono"/>
+<line x1="124.9" y1="368" x2="124.9" y2="374" class="abandono"/>
+<line x1="127.7" y1="368" x2="127.7" y2="374" class="abandono"/>
+<line x1="128.6" y1="368" x2="128.6" y2="374" class="abandono"/>
+<line x1="129.5" y1="368" x2="129.5" y2="374" class="abandono"/>
+<line x1="130.5" y1="368" x2="130.5" y2="374" class="abandono"/>
+<line x1="131.2" y1="368" x2="131.2" y2="374" class="abandono"/>
+<line x1="131.9" y1="368" x2="131.9" y2="374" class="abandono"/>
+<line x1="132.0" y1="368" x2="132.0" y2="374" class="abandono"/>
+<line x1="132.3" y1="368" x2="132.3" y2="374" class="abandono"/>
+<line x1="132.7" y1="368" x2="132.7" y2="374" class="abandono"/>
+<line x1="133.6" y1="368" x2="133.6" y2="374" class="abandono"/>
+<line x1="133.9" y1="368" x2="133.9" y2="374" class="abandono"/>
+<line x1="134.3" y1="368" x2="134.3" y2="374" class="abandono"/>
+<line x1="134.4" y1="368" x2="134.4" y2="374" class="abandono"/>
+<line x1="135.7" y1="368" x2="135.7" y2="374" class="abandono"/>
+<line x1="136.1" y1="368" x2="136.1" y2="374" class="abandono"/>
+<line x1="136.4" y1="368" x2="136.4" y2="374" class="abandono"/>
+<line x1="137.1" y1="368" x2="137.1" y2="374" class="abandono"/>
+<line x1="137.3" y1="368" x2="137.3" y2="374" class="abandono"/>
+<line x1="138.8" y1="368" x2="138.8" y2="374" class="abandono"/>
+<line x1="139.7" y1="368" x2="139.7" y2="374" class="abandono"/>
+<line x1="139.9" y1="368" x2="139.9" y2="374" class="abandono"/>
+<line x1="140.7" y1="368" x2="140.7" y2="374" class="abandono"/>
+<line x1="141.2" y1="368" x2="141.2" y2="374" class="abandono"/>
+<line x1="141.5" y1="368" x2="141.5" y2="374" class="abandono"/>
+<line x1="142.3" y1="368" x2="142.3" y2="374" class="abandono"/>
+<line x1="142.6" y1="368" x2="142.6" y2="374" class="abandono"/>
+<line x1="143.6" y1="368" x2="143.6" y2="374" class="abandono"/>
+<line x1="144.6" y1="368" x2="144.6" y2="374" class="abandono"/>
+<line x1="148.2" y1="368" x2="148.2" y2="374" class="abandono"/>
+<line x1="149.9" y1="368" x2="149.9" y2="374" class="abandono"/>
+<line x1="150.6" y1="368" x2="150.6" y2="374" class="abandono"/>
+<line x1="151.2" y1="368" x2="151.2" y2="374" class="abandono"/>
+<line x1="152.1" y1="368" x2="152.1" y2="374" class="abandono"/>
+<line x1="152.2" y1="368" x2="152.2" y2="374" class="abandono"/>
+<line x1="153.4" y1="368" x2="153.4" y2="374" class="abandono"/>
+<line x1="153.7" y1="368" x2="153.7" y2="374" class="abandono"/>
+<line x1="154.9" y1="368" x2="154.9" y2="374" class="abandono"/>
+<line x1="154.9" y1="368" x2="154.9" y2="374" class="abandono"/>
+<line x1="155.8" y1="368" x2="155.8" y2="374" class="abandono"/>
+<line x1="156.7" y1="368" x2="156.7" y2="374" class="abandono"/>
+<line x1="160.8" y1="368" x2="160.8" y2="374" class="abandono"/>
+<line x1="164.0" y1="368" x2="164.0" y2="374" class="abandono"/>
+<line x1="166.5" y1="368" x2="166.5" y2="374" class="abandono"/>
+<line x1="166.5" y1="368" x2="166.5" y2="374" class="abandono"/>
+<line x1="167.5" y1="368" x2="167.5" y2="374" class="abandono"/>
+<line x1="169.2" y1="368" x2="169.2" y2="374" class="abandono"/>
+<line x1="170.2" y1="368" x2="170.2" y2="374" class="abandono"/>
+<line x1="170.7" y1="368" x2="170.7" y2="374" class="abandono"/>
+<line x1="171.4" y1="368" x2="171.4" y2="374" class="abandono"/>
+<line x1="172.0" y1="368" x2="172.0" y2="374" class="abandono"/>
+<line x1="173.2" y1="368" x2="173.2" y2="374" class="abandono"/>
+<line x1="174.1" y1="368" x2="174.1" y2="374" class="abandono"/>
+<line x1="175.4" y1="368" x2="175.4" y2="374" class="abandono"/>
+<line x1="176.1" y1="368" x2="176.1" y2="374" class="abandono"/>
+<line x1="177.6" y1="368" x2="177.6" y2="374" class="abandono"/>
+<line x1="177.7" y1="368" x2="177.7" y2="374" class="abandono"/>
+<line x1="178.2" y1="368" x2="178.2" y2="374" class="abandono"/>
+<line x1="178.3" y1="368" x2="178.3" y2="374" class="abandono"/>
+<line x1="179.0" y1="368" x2="179.0" y2="374" class="abandono"/>
+<line x1="179.2" y1="368" x2="179.2" y2="374" class="abandono"/>
+<line x1="182.0" y1="368" x2="182.0" y2="374" class="abandono"/>
+<line x1="183.1" y1="368" x2="183.1" y2="374" class="abandono"/>
+<line x1="194.9" y1="368" x2="194.9" y2="374" class="abandono"/>
+<line x1="195.9" y1="368" x2="195.9" y2="374" class="abandono"/>
+<line x1="197.7" y1="368" x2="197.7" y2="374" class="abandono"/>
+<line x1="201.3" y1="368" x2="201.3" y2="374" class="abandono"/>
+<line x1="202.3" y1="368" x2="202.3" y2="374" class="abandono"/>
+<line x1="204.7" y1="368" x2="204.7" y2="374" class="abandono"/>
+<line x1="206.4" y1="368" x2="206.4" y2="374" class="abandono"/>
+<line x1="207.5" y1="368" x2="207.5" y2="374" class="abandono"/>
+<line x1="209.7" y1="368" x2="209.7" y2="374" class="abandono"/>
+<line x1="221.7" y1="368" x2="221.7" y2="374" class="abandono"/>
+<line x1="223.1" y1="368" x2="223.1" y2="374" class="abandono"/>
+<line x1="224.3" y1="368" x2="224.3" y2="374" class="abandono"/>
+<line x1="226.9" y1="368" x2="226.9" y2="374" class="abandono"/>
+<line x1="229.0" y1="368" x2="229.0" y2="374" class="abandono"/>
+<line x1="229.9" y1="368" x2="229.9" y2="374" class="abandono"/>
+<line x1="230.6" y1="368" x2="230.6" y2="374" class="abandono"/>
+<line x1="232.5" y1="368" x2="232.5" y2="374" class="abandono"/>
+<line x1="233.7" y1="368" x2="233.7" y2="374" class="abandono"/>
+<line x1="238.8" y1="368" x2="238.8" y2="374" class="abandono"/>
+<line x1="239.4" y1="368" x2="239.4" y2="374" class="abandono"/>
+<line x1="243.5" y1="368" x2="243.5" y2="374" class="abandono"/>
+<line x1="245.9" y1="368" x2="245.9" y2="374" class="abandono"/>
+<line x1="246.9" y1="368" x2="246.9" y2="374" class="abandono"/>
+<line x1="262.4" y1="368" x2="262.4" y2="374" class="abandono"/>
+<line x1="268.6" y1="368" x2="268.6" y2="374" class="abandono"/>
+<line x1="274.5" y1="368" x2="274.5" y2="374" class="abandono"/>
+<line x1="278.3" y1="368" x2="278.3" y2="374" class="abandono"/>
+<line x1="279.1" y1="368" x2="279.1" y2="374" class="abandono"/>
+<line x1="280.5" y1="368" x2="280.5" y2="374" class="abandono"/>
+<line x1="282.2" y1="368" x2="282.2" y2="374" class="abandono"/>
+<line x1="283.2" y1="368" x2="283.2" y2="374" class="abandono"/>
+<line x1="284.1" y1="368" x2="284.1" y2="374" class="abandono"/>
+<line x1="285.3" y1="368" x2="285.3" y2="374" class="abandono"/>
+<line x1="291.3" y1="368" x2="291.3" y2="374" class="abandono"/>
+<line x1="293.5" y1="368" x2="293.5" y2="374" class="abandono"/>
+<line x1="300.7" y1="368" x2="300.7" y2="374" class="abandono"/>
+<line x1="302.9" y1="368" x2="302.9" y2="374" class="abandono"/>
+<line x1="303.0" y1="368" x2="303.0" y2="374" class="abandono"/>
+<line x1="304.5" y1="368" x2="304.5" y2="374" class="abandono"/>
+<line x1="304.5" y1="368" x2="304.5" y2="374" class="abandono"/>
+<line x1="305.7" y1="368" x2="305.7" y2="374" class="abandono"/>
+<line x1="306.7" y1="368" x2="306.7" y2="374" class="abandono"/>
+<line x1="307.5" y1="368" x2="307.5" y2="374" class="abandono"/>
+<line x1="310.4" y1="368" x2="310.4" y2="374" class="abandono"/>
+<line x1="311.1" y1="368" x2="311.1" y2="374" class="abandono"/>
+<line x1="311.8" y1="368" x2="311.8" y2="374" class="abandono"/>
+<line x1="314.2" y1="368" x2="314.2" y2="374" class="abandono"/>
+<line x1="317.2" y1="368" x2="317.2" y2="374" class="abandono"/>
+<line x1="320.9" y1="368" x2="320.9" y2="374" class="abandono"/>
+<line x1="323.3" y1="368" x2="323.3" y2="374" class="abandono"/>
+<line x1="328.0" y1="368" x2="328.0" y2="374" class="abandono"/>
+<line x1="328.5" y1="368" x2="328.5" y2="374" class="abandono"/>
+<line x1="329.5" y1="368" x2="329.5" y2="374" class="abandono"/>
+<line x1="329.5" y1="368" x2="329.5" y2="374" class="abandono"/>
+<line x1="330.6" y1="368" x2="330.6" y2="374" class="abandono"/>
+<line x1="334.3" y1="368" x2="334.3" y2="374" class="abandono"/>
+<line x1="334.3" y1="368" x2="334.3" y2="374" class="abandono"/>
+<line x1="335.4" y1="368" x2="335.4" y2="374" class="abandono"/>
+<line x1="339.0" y1="368" x2="339.0" y2="374" class="abandono"/>
+<line x1="340.3" y1="368" x2="340.3" y2="374" class="abandono"/>
+<line x1="341.7" y1="368" x2="341.7" y2="374" class="abandono"/>
+<line x1="349.5" y1="368" x2="349.5" y2="374" class="abandono"/>
+<line x1="352.8" y1="368" x2="352.8" y2="374" class="abandono"/>
+<line x1="355.8" y1="368" x2="355.8" y2="374" class="abandono"/>
+<line x1="356.3" y1="368" x2="356.3" y2="374" class="abandono"/>
+<line x1="357.9" y1="368" x2="357.9" y2="374" class="abandono"/>
+<line x1="360.4" y1="368" x2="360.4" y2="374" class="abandono"/>
+<line x1="360.6" y1="368" x2="360.6" y2="374" class="abandono"/>
+<line x1="362.5" y1="368" x2="362.5" y2="374" class="abandono"/>
+<line x1="363.4" y1="368" x2="363.4" y2="374" class="abandono"/>
+<line x1="365.6" y1="368" x2="365.6" y2="374" class="abandono"/>
+<line x1="367.3" y1="368" x2="367.3" y2="374" class="abandono"/>
+<line x1="367.5" y1="368" x2="367.5" y2="374" class="abandono"/>
+<line x1="367.9" y1="368" x2="367.9" y2="374" class="abandono"/>
+<line x1="368.0" y1="368" x2="368.0" y2="374" class="abandono"/>
+<line x1="368.6" y1="368" x2="368.6" y2="374" class="abandono"/>
+<line x1="369.9" y1="368" x2="369.9" y2="374" class="abandono"/>
+<line x1="370.6" y1="368" x2="370.6" y2="374" class="abandono"/>
+<line x1="373.6" y1="368" x2="373.6" y2="374" class="abandono"/>
+<line x1="376.5" y1="368" x2="376.5" y2="374" class="abandono"/>
+<line x1="377.1" y1="368" x2="377.1" y2="374" class="abandono"/>
+<line x1="379.9" y1="368" x2="379.9" y2="374" class="abandono"/>
+<line x1="380.0" y1="368" x2="380.0" y2="374" class="abandono"/>
+<line x1="380.8" y1="368" x2="380.8" y2="374" class="abandono"/>
+<line x1="383.0" y1="368" x2="383.0" y2="374" class="abandono"/>
+<line x1="383.9" y1="368" x2="383.9" y2="374" class="abandono"/>
+<line x1="386.9" y1="368" x2="386.9" y2="374" class="abandono"/>
+<line x1="389.7" y1="368" x2="389.7" y2="374" class="abandono"/>
+<line x1="391.2" y1="368" x2="391.2" y2="374" class="abandono"/>
+<line x1="391.6" y1="368" x2="391.6" y2="374" class="abandono"/>
+<line x1="400.0" y1="368" x2="400.0" y2="374" class="abandono"/>
+<line x1="403.4" y1="368" x2="403.4" y2="374" class="abandono"/>
+<line x1="404.0" y1="368" x2="404.0" y2="374" class="abandono"/>
+<line x1="419.1" y1="368" x2="419.1" y2="374" class="abandono"/>
+<line x1="419.9" y1="368" x2="419.9" y2="374" class="abandono"/>
+<line x1="420.6" y1="368" x2="420.6" y2="374" class="abandono"/>
+<line x1="424.3" y1="368" x2="424.3" y2="374" class="abandono"/>
+<line x1="425.0" y1="368" x2="425.0" y2="374" class="abandono"/>
+<line x1="427.7" y1="368" x2="427.7" y2="374" class="abandono"/>
+<line x1="431.9" y1="368" x2="431.9" y2="374" class="abandono"/>
+<line x1="445.0" y1="368" x2="445.0" y2="374" class="abandono"/>
+<line x1="447.3" y1="368" x2="447.3" y2="374" class="abandono"/>
+<line x1="455.2" y1="368" x2="455.2" y2="374" class="abandono"/>
+<line x1="456.4" y1="368" x2="456.4" y2="374" class="abandono"/>
+<line x1="457.5" y1="368" x2="457.5" y2="374" class="abandono"/>
+<line x1="457.8" y1="368" x2="457.8" y2="374" class="abandono"/>
+<line x1="461.4" y1="368" x2="461.4" y2="374" class="abandono"/>
+<line x1="463.1" y1="368" x2="463.1" y2="374" class="abandono"/>
+<line x1="473.4" y1="368" x2="473.4" y2="374" class="abandono"/>
+<line x1="473.8" y1="368" x2="473.8" y2="374" class="abandono"/>
+<line x1="476.5" y1="368" x2="476.5" y2="374" class="abandono"/>
+<line x1="477.4" y1="368" x2="477.4" y2="374" class="abandono"/>
+<line x1="480.4" y1="368" x2="480.4" y2="374" class="abandono"/>
+<line x1="493.8" y1="368" x2="493.8" y2="374" class="abandono"/>
+<line x1="500.1" y1="368" x2="500.1" y2="374" class="abandono"/>
+<line x1="502.5" y1="368" x2="502.5" y2="374" class="abandono"/>
+<line x1="509.8" y1="368" x2="509.8" y2="374" class="abandono"/>
+<line x1="521.4" y1="368" x2="521.4" y2="374" class="abandono"/>
+<line x1="523.7" y1="368" x2="523.7" y2="374" class="abandono"/>
+<line x1="530.0" y1="368" x2="530.0" y2="374" class="abandono"/>
+<line x1="531.8" y1="368" x2="531.8" y2="374" class="abandono"/>
+<line x1="533.5" y1="368" x2="533.5" y2="374" class="abandono"/>
+<line x1="543.2" y1="368" x2="543.2" y2="374" class="abandono"/>
+<line x1="547.8" y1="368" x2="547.8" y2="374" class="abandono"/>
+<line x1="548.8" y1="368" x2="548.8" y2="374" class="abandono"/>
+<line x1="551.6" y1="368" x2="551.6" y2="374" class="abandono"/>
+<line x1="557.9" y1="368" x2="557.9" y2="374" class="abandono"/>
+<line x1="561.0" y1="368" x2="561.0" y2="374" class="abandono"/>
+<line x1="562.7" y1="368" x2="562.7" y2="374" class="abandono"/>
+<line x1="565.1" y1="368" x2="565.1" y2="374" class="abandono"/>
+<line x1="566.1" y1="368" x2="566.1" y2="374" class="abandono"/>
+<line x1="567.6" y1="368" x2="567.6" y2="374" class="abandono"/>
+<line x1="569.9" y1="368" x2="569.9" y2="374" class="abandono"/>
+<line x1="577.2" y1="368" x2="577.2" y2="374" class="abandono"/>
+<line x1="584.4" y1="368" x2="584.4" y2="374" class="abandono"/>
+<line x1="596.5" y1="368" x2="596.5" y2="374" class="abandono"/>
+<line x1="600.0" y1="368" x2="600.0" y2="374" class="abandono"/>
+<line x1="609.8" y1="368" x2="609.8" y2="374" class="abandono"/>
+<line x1="610.4" y1="368" x2="610.4" y2="374" class="abandono"/>
+<line x1="625.0" y1="368" x2="625.0" y2="374" class="abandono"/>
+<line x1="625.4" y1="368" x2="625.4" y2="374" class="abandono"/>
+<line x1="626.8" y1="368" x2="626.8" y2="374" class="abandono"/>
+<line x1="636.2" y1="368" x2="636.2" y2="374" class="abandono"/>
+<line x1="639.0" y1="368" x2="639.0" y2="374" class="abandono"/>
+<line x1="640.9" y1="368" x2="640.9" y2="374" class="abandono"/>
+<line x1="644.6" y1="368" x2="644.6" y2="374" class="abandono"/>
+<line x1="645.2" y1="368" x2="645.2" y2="374" class="abandono"/>
+<line x1="645.9" y1="368" x2="645.9" y2="374" class="abandono"/>
+<line x1="646.5" y1="368" x2="646.5" y2="374" class="abandono"/>
+<line x1="646.6" y1="368" x2="646.6" y2="374" class="abandono"/>
+<line x1="649.2" y1="368" x2="649.2" y2="374" class="abandono"/>
+<line x1="661.8" y1="368" x2="661.8" y2="374" class="abandono"/>
+<line x1="662.1" y1="368" x2="662.1" y2="374" class="abandono"/>
+<line x1="666.1" y1="368" x2="666.1" y2="374" class="abandono"/>
+<line x1="668.9" y1="368" x2="668.9" y2="374" class="abandono"/>
+<line x1="670.0" y1="368" x2="670.0" y2="374" class="abandono"/>
+<line x1="670.1" y1="368" x2="670.1" y2="374" class="abandono"/>
+<line x1="671.2" y1="368" x2="671.2" y2="374" class="abandono"/>
+<line x1="671.4" y1="368" x2="671.4" y2="374" class="abandono"/>
+<line x1="673.2" y1="368" x2="673.2" y2="374" class="abandono"/>
+<line x1="688.6" y1="368" x2="688.6" y2="374" class="abandono"/>
+<line x1="703.4" y1="368" x2="703.4" y2="374" class="abandono"/>
+<line x1="708.0" y1="368" x2="708.0" y2="374" class="abandono"/>
+<line x1="709.7" y1="368" x2="709.7" y2="374" class="abandono"/>
+<line x1="709.9" y1="368" x2="709.9" y2="374" class="abandono"/>
+<line x1="717.0" y1="368" x2="717.0" y2="374" class="abandono"/>
+<line x1="718.6" y1="368" x2="718.6" y2="374" class="abandono"/>
+<line x1="720.4" y1="368" x2="720.4" y2="374" class="abandono"/>
+<line x1="722.1" y1="368" x2="722.1" y2="374" class="abandono"/>
+<line x1="724.9" y1="368" x2="724.9" y2="374" class="abandono"/>
+<line x1="727.1" y1="368" x2="727.1" y2="374" class="abandono"/>
+<line x1="729.3" y1="368" x2="729.3" y2="374" class="abandono"/>
+<line x1="729.4" y1="368" x2="729.4" y2="374" class="abandono"/>
+<line x1="731.1" y1="368" x2="731.1" y2="374" class="abandono"/>
+<line x1="731.2" y1="368" x2="731.2" y2="374" class="abandono"/>
+<line x1="732.0" y1="368" x2="732.0" y2="374" class="abandono"/>
+<line x1="733.3" y1="368" x2="733.3" y2="374" class="abandono"/>
+<line x1="739.3" y1="368" x2="739.3" y2="374" class="abandono"/>
+<line x1="740.8" y1="368" x2="740.8" y2="374" class="abandono"/>
+<line x1="745.6" y1="368" x2="745.6" y2="374" class="abandono"/>
+<line x1="747.4" y1="368" x2="747.4" y2="374" class="abandono"/>
+<line x1="749.5" y1="368" x2="749.5" y2="374" class="abandono"/>
+<line x1="752.4" y1="368" x2="752.4" y2="374" class="abandono"/>
+<line x1="754.2" y1="368" x2="754.2" y2="374" class="abandono"/>
+<line x1="762.5" y1="368" x2="762.5" y2="374" class="abandono"/>
+<line x1="765.0" y1="368" x2="765.0" y2="374" class="abandono"/>
+<line x1="769.6" y1="368" x2="769.6" y2="374" class="abandono"/>
+<line x1="771.8" y1="368" x2="771.8" y2="374" class="abandono"/>
+<line x1="776.5" y1="368" x2="776.5" y2="374" class="abandono"/>
+<line x1="779.7" y1="368" x2="779.7" y2="374" class="abandono"/>
+<line x1="782.1" y1="368" x2="782.1" y2="374" class="abandono"/>
+<line x1="785.1" y1="368" x2="785.1" y2="374" class="abandono"/>
+<line x1="786.5" y1="368" x2="786.5" y2="374" class="abandono"/>
+<line x1="799.7" y1="368" x2="799.7" y2="374" class="abandono"/>
+<line x1="801.3" y1="368" x2="801.3" y2="374" class="abandono"/>
+<line x1="824.6" y1="368" x2="824.6" y2="374" class="abandono"/>
+<line x1="827.2" y1="368" x2="827.2" y2="374" class="abandono"/>
+<line x1="832.3" y1="368" x2="832.3" y2="374" class="abandono"/>
+<line x1="834.6" y1="368" x2="834.6" y2="374" class="abandono"/>
+<line x1="835.2" y1="368" x2="835.2" y2="374" class="abandono"/>
+<line x1="838.6" y1="368" x2="838.6" y2="374" class="abandono"/>
+<line x1="841.1" y1="368" x2="841.1" y2="374" class="abandono"/>
+<line x1="843.1" y1="368" x2="843.1" y2="374" class="abandono"/>
+<line x1="844.7" y1="368" x2="844.7" y2="374" class="abandono"/>
+<line x1="846.8" y1="368" x2="846.8" y2="374" class="abandono"/>
+<line x1="848.9" y1="368" x2="848.9" y2="374" class="abandono"/>
+<line x1="849.9" y1="368" x2="849.9" y2="374" class="abandono"/>
+<line x1="851.9" y1="368" x2="851.9" y2="374" class="abandono"/>
+<line x1="853.6" y1="368" x2="853.6" y2="374" class="abandono"/>
+<line x1="854.6" y1="368" x2="854.6" y2="374" class="abandono"/>
+<line x1="858.9" y1="368" x2="858.9" y2="374" class="abandono"/>
+<line x1="861.9" y1="368" x2="861.9" y2="374" class="abandono"/>
+<line x1="864.9" y1="368" x2="864.9" y2="374" class="abandono"/>
+<line x1="875.8" y1="368" x2="875.8" y2="374" class="abandono"/>
+<line x1="877.2" y1="368" x2="877.2" y2="374" class="abandono"/>
+<line x1="879.9" y1="368" x2="879.9" y2="374" class="abandono"/>
+<line x1="880.1" y1="368" x2="880.1" y2="374" class="abandono"/>
+<line x1="882.4" y1="368" x2="882.4" y2="374" class="abandono"/>
+<line x1="897.8" y1="368" x2="897.8" y2="374" class="abandono"/>
+<line x1="901.2" y1="368" x2="901.2" y2="374" class="abandono"/>
+<line x1="904.3" y1="368" x2="904.3" y2="374" class="abandono"/>
+<line x1="904.7" y1="368" x2="904.7" y2="374" class="abandono"/>
+<line x1="906.9" y1="368" x2="906.9" y2="374" class="abandono"/>
+<line x1="908.9" y1="368" x2="908.9" y2="374" class="abandono"/>
+<line x1="910.6" y1="368" x2="910.6" y2="374" class="abandono"/>
+<line x1="911.5" y1="368" x2="911.5" y2="374" class="abandono"/>
+<line x1="912.8" y1="368" x2="912.8" y2="374" class="abandono"/>
+<line x1="913.4" y1="368" x2="913.4" y2="374" class="abandono"/>
+<line x1="916.2" y1="368" x2="916.2" y2="374" class="abandono"/>
+<line x1="917.9" y1="368" x2="917.9" y2="374" class="abandono"/>
+<line x1="918.1" y1="368" x2="918.1" y2="374" class="abandono"/>
+<line x1="918.8" y1="368" x2="918.8" y2="374" class="abandono"/>
+<line x1="924.1" y1="368" x2="924.1" y2="374" class="abandono"/>
+<line x1="927.6" y1="368" x2="927.6" y2="374" class="abandono"/>
+<line x1="928.8" y1="368" x2="928.8" y2="374" class="abandono"/>
+<line x1="929.3" y1="368" x2="929.3" y2="374" class="abandono"/>
+<line x1="931.0" y1="368" x2="931.0" y2="374" class="abandono"/>
+<line x1="932.7" y1="368" x2="932.7" y2="374" class="abandono"/>
+<line x1="934.7" y1="368" x2="934.7" y2="374" class="abandono"/>
+<line x1="938.3" y1="368" x2="938.3" y2="374" class="abandono"/>
+<line x1="942.6" y1="368" x2="942.6" y2="374" class="abandono"/>
+<line x1="948.3" y1="368" x2="948.3" y2="374" class="abandono"/>
+<line x1="952.0" y1="368" x2="952.0" y2="374" class="abandono"/>
+<line x1="957.8" y1="368" x2="957.8" y2="374" class="abandono"/>
+<line x1="959.9" y1="368" x2="959.9" y2="374" class="abandono"/>
+<line x1="963.4" y1="368" x2="963.4" y2="374" class="abandono"/>
+<line x1="966.0" y1="368" x2="966.0" y2="374" class="abandono"/>
+<line x1="966.7" y1="368" x2="966.7" y2="374" class="abandono"/>
+<line x1="968.1" y1="368" x2="968.1" y2="374" class="abandono"/>
+<line x1="968.2" y1="368" x2="968.2" y2="374" class="abandono"/>
+<line x1="969.9" y1="368" x2="969.9" y2="374" class="abandono"/>
+<line x1="970.0" y1="368" x2="970.0" y2="374" class="abandono"/>
+<line x1="974.0" y1="368" x2="974.0" y2="374" class="abandono"/>
+<circle cx="63.2" cy="229.3" r="2.1" class="punto"/>
+<circle cx="67.2" cy="197.7" r="2.1" class="punto"/>
+<circle cx="89.4" cy="116.8" r="2.1" class="punto"/>
+<circle cx="96.6" cy="191.0" r="2.1" class="punto"/>
+<circle cx="97.2" cy="156.9" r="2.1" class="punto"/>
+<circle cx="98.9" cy="172.9" r="2.1" class="punto"/>
+<circle cx="102.3" cy="140.8" r="2.1" class="punto"/>
+<circle cx="102.4" cy="144.4" r="2.1" class="punto"/>
+<circle cx="109.0" cy="160.5" r="2.1" class="punto"/>
+<circle cx="114.0" cy="182.7" r="2.1" class="punto"/>
+<circle cx="115.7" cy="118.5" r="2.1" class="punto"/>
+<circle cx="117.7" cy="135.4" r="2.1" class="punto"/>
+<circle cx="119.6" cy="100.4" r="2.1" class="punto"/>
+<circle cx="120.4" cy="182.5" r="2.1" class="punto"/>
+<circle cx="125.8" cy="145.0" r="2.1" class="punto"/>
+<circle cx="127.0" cy="145.5" r="2.1" class="punto"/>
+<circle cx="128.9" cy="134.4" r="2.1" class="punto"/>
+<circle cx="130.2" cy="164.0" r="2.1" class="punto"/>
+<circle cx="131.1" cy="173.2" r="2.1" class="punto"/>
+<circle cx="133.4" cy="147.0" r="2.1" class="punto"/>
+<circle cx="133.8" cy="147.6" r="2.1" class="punto"/>
+<circle cx="135.0" cy="175.7" r="2.1" class="punto"/>
+<circle cx="135.6" cy="53.9" r="2.1" class="punto"/>
+<circle cx="142.2" cy="158.1" r="2.1" class="punto"/>
+<circle cx="145.8" cy="152.0" r="2.1" class="punto"/>
+<circle cx="149.4" cy="134.3" r="2.1" class="punto"/>
+<circle cx="151.3" cy="144.1" r="2.1" class="punto"/>
+<circle cx="154.1" cy="124.4" r="2.1" class="punto"/>
+<circle cx="159.9" cy="143.8" r="2.1" class="punto"/>
+<circle cx="161.6" cy="115.9" r="2.1" class="punto"/>
+<circle cx="165.0" cy="94.4" r="2.1" class="punto"/>
+<circle cx="165.4" cy="139.0" r="2.1" class="punto"/>
+<circle cx="170.9" cy="125.9" r="2.1" class="punto"/>
+<circle cx="175.2" cy="151.4" r="2.1" class="punto"/>
+<circle cx="181.0" cy="152.9" r="2.1" class="punto"/>
+<circle cx="183.5" cy="107.8" r="2.1" class="punto"/>
+<circle cx="186.9" cy="192.3" r="2.1" class="punto"/>
+<circle cx="190.3" cy="140.4" r="2.1" class="punto"/>
+<circle cx="196.5" cy="146.6" r="2.1" class="punto"/>
+<circle cx="203.8" cy="125.9" r="2.1" class="punto"/>
+<circle cx="218.3" cy="139.1" r="2.1" class="punto"/>
+<circle cx="219.7" cy="127.2" r="2.1" class="punto"/>
+<circle cx="227.3" cy="66.4" r="2.1" class="punto"/>
+<circle cx="228.1" cy="120.8" r="2.1" class="punto"/>
+<circle cx="237.1" cy="158.9" r="2.1" class="punto"/>
+<circle cx="238.1" cy="119.9" r="2.1" class="punto"/>
+<circle cx="238.8" cy="140.2" r="2.1" class="punto"/>
+<circle cx="244.8" cy="140.7" r="2.1" class="punto"/>
+<circle cx="251.2" cy="134.5" r="2.1" class="punto"/>
+<circle cx="252.3" cy="90.2" r="2.1" class="punto"/>
+<circle cx="253.4" cy="123.5" r="2.1" class="punto"/>
+<circle cx="259.6" cy="119.4" r="2.1" class="punto"/>
+<circle cx="263.3" cy="135.4" r="2.1" class="punto"/>
+<circle cx="270.2" cy="111.0" r="2.1" class="punto"/>
+<circle cx="280.4" cy="109.8" r="2.1" class="punto"/>
+<circle cx="290.3" cy="72.0" r="2.1" class="punto"/>
+<circle cx="298.2" cy="189.0" r="2.1" class="punto"/>
+<circle cx="299.9" cy="110.4" r="2.1" class="punto"/>
+<circle cx="315.3" cy="95.3" r="2.1" class="punto"/>
+<circle cx="316.6" cy="118.3" r="2.1" class="punto"/>
+<circle cx="321.5" cy="83.0" r="2.1" class="punto"/>
+<circle cx="322.4" cy="100.2" r="2.1" class="punto"/>
+<circle cx="327.7" cy="104.7" r="2.1" class="punto"/>
+<circle cx="333.5" cy="111.1" r="2.1" class="punto"/>
+<circle cx="347.9" cy="138.2" r="2.1" class="punto"/>
+<circle cx="351.4" cy="114.8" r="2.1" class="punto"/>
+<circle cx="359.6" cy="119.8" r="2.1" class="punto"/>
+<circle cx="364.9" cy="119.8" r="2.1" class="punto"/>
+<circle cx="372.8" cy="74.1" r="2.1" class="punto"/>
+<circle cx="375.2" cy="117.5" r="2.1" class="punto"/>
+<circle cx="398.9" cy="155.0" r="2.1" class="punto"/>
+<circle cx="409.3" cy="111.2" r="2.1" class="punto"/>
+<circle cx="409.9" cy="145.8" r="2.1" class="punto"/>
+<circle cx="421.0" cy="118.4" r="2.1" class="punto"/>
+<circle cx="442.1" cy="90.9" r="2.1" class="punto"/>
+<circle cx="458.3" cy="104.7" r="2.1" class="punto"/>
+<circle cx="476.0" cy="109.3" r="2.1" class="punto"/>
+<circle cx="497.3" cy="121.4" r="2.1" class="punto"/>
+<circle cx="500.6" cy="117.0" r="2.1" class="punto"/>
+<circle cx="509.5" cy="121.1" r="2.1" class="punto"/>
+<circle cx="521.5" cy="65.9" r="2.1" class="punto"/>
+<circle cx="527.2" cy="143.8" r="2.1" class="punto"/>
+<circle cx="529.7" cy="137.5" r="2.1" class="punto"/>
+<circle cx="532.3" cy="74.5" r="2.1" class="punto"/>
+<circle cx="538.8" cy="124.3" r="2.1" class="punto"/>
+<circle cx="546.3" cy="122.9" r="2.1" class="punto"/>
+<circle cx="555.0" cy="93.7" r="2.1" class="punto"/>
+<circle cx="559.5" cy="79.6" r="2.1" class="punto"/>
+<circle cx="565.7" cy="106.2" r="2.1" class="punto"/>
+<circle cx="576.0" cy="75.7" r="2.1" class="punto"/>
+<circle cx="581.7" cy="83.1" r="2.1" class="punto"/>
+<circle cx="588.5" cy="89.8" r="2.1" class="punto"/>
+<circle cx="592.0" cy="63.3" r="2.1" class="punto"/>
+<circle cx="604.7" cy="41.6" r="2.1" class="punto"/>
+<circle cx="609.5" cy="47.6" r="2.1" class="punto"/>
+<circle cx="617.6" cy="30.9" r="2.1" class="punto"/>
+<circle cx="622.1" cy="93.3" r="2.1" class="punto"/>
+<circle cx="622.8" cy="61.8" r="2.1" class="punto"/>
+<circle cx="631.6" cy="119.0" r="2.1" class="punto"/>
+<circle cx="632.9" cy="122.0" r="2.1" class="punto"/>
+<circle cx="661.4" cy="153.9" r="2.1" class="punto"/>
+<circle cx="662.9" cy="69.8" r="2.1" class="punto"/>
+<circle cx="666.9" cy="93.2" r="2.1" class="punto"/>
+<circle cx="670.1" cy="104.1" r="2.1" class="punto"/>
+<circle cx="688.9" cy="103.0" r="2.1" class="punto"/>
+<circle cx="701.4" cy="48.9" r="2.1" class="punto"/>
+<circle cx="704.4" cy="124.0" r="2.1" class="punto"/>
+<circle cx="707.2" cy="82.0" r="2.1" class="punto"/>
+<circle cx="716.1" cy="41.8" r="2.1" class="punto"/>
+<circle cx="726.4" cy="87.8" r="2.1" class="punto"/>
+<circle cx="727.7" cy="96.0" r="2.1" class="punto"/>
+<circle cx="739.1" cy="144.7" r="2.1" class="punto"/>
+<circle cx="751.6" cy="93.5" r="2.1" class="punto"/>
+<circle cx="777.0" cy="62.4" r="2.1" class="punto"/>
+<circle cx="780.4" cy="92.8" r="2.1" class="punto"/>
+<circle cx="797.5" cy="151.4" r="2.1" class="punto"/>
+<circle cx="799.0" cy="94.3" r="2.1" class="punto"/>
+<circle cx="812.7" cy="100.7" r="2.1" class="punto"/>
+<circle cx="816.0" cy="73.7" r="2.1" class="punto"/>
+<circle cx="822.8" cy="54.6" r="2.1" class="punto"/>
+<circle cx="830.2" cy="30.9" r="2.1" class="punto"/>
+<circle cx="833.9" cy="89.7" r="2.1" class="punto"/>
+<circle cx="862.0" cy="127.9" r="2.1" class="punto"/>
+<circle cx="874.2" cy="62.1" r="2.1" class="punto"/>
+<circle cx="877.1" cy="85.8" r="2.1" class="punto"/>
+<circle cx="889.9" cy="118.8" r="2.1" class="punto"/>
+<circle cx="902.4" cy="93.1" r="2.1" class="punto"/>
+<circle cx="902.8" cy="107.1" r="2.1" class="punto"/>
+<circle cx="915.5" cy="70.6" r="2.1" class="punto"/>
+<circle cx="942.9" cy="74.8" r="2.1" class="punto"/>
+<circle cx="955.8" cy="105.2" r="2.1" class="punto"/>
+<circle cx="959.6" cy="119.9" r="2.1" class="punto"/>
+<circle cx="967.4" cy="94.7" r="2.1" class="punto"/>
+<path d="M63.2,229.3 L67.2,212.6 L89.4,154.3 L96.6,164.3 L97.2,161.4 L98.9,163.4 L102.3,157.5 L102.4,155.0 L109.0,156.1 L114.0,161.4 L115.7,154.3 L117.7,151.3 L119.6,143.8 L120.4,148.8 L125.8,147.9 L127.0,147.3 L128.9,145.2 L130.2,147.1 L131.1,149.9 L133.4,149.3 L133.8,149.1 L135.0,151.7 L135.6,142.7 L142.2,143.9 L145.8,144.6 L149.4,143.3 L151.3,143.4 L154.1,141.0 L159.9,140.7 L161.6,136.7 L165.0,129.1 L165.4,130.3 L170.9,128.2 L175.2,131.4 L181.0,134.8 L183.5,130.0 L186.9,141.4 L190.3,142.3 L196.5,145.3 L203.8,142.7 L218.3,139.6 L219.7,135.5 L227.3,111.0 L228.1,113.2 L237.1,123.9 L238.1,123.0 L238.8,126.3 L244.8,129.5 L251.2,131.4 L252.3,124.0 L253.4,123.9 L259.6,123.6 L263.3,126.2 L270.2,122.0 L280.4,116.7 L290.3,98.5 L298.2,129.7 L299.9,124.4 L315.3,116.3 L316.6,117.0 L321.5,107.5 L322.4,105.8 L327.7,104.4 L333.5,103.3 L347.9,115.5 L351.4,117.0 L359.6,121.3 L364.9,121.5 L372.8,106.4 L375.2,108.7 L398.9,132.5 L409.3,129.0 L409.9,135.2 L421.0,128.7 L442.1,103.0 L458.3,99.8 L476.0,107.0 L497.3,117.9 L500.6,117.7 L509.5,119.6 L521.5,97.7 L527.2,112.2 L529.7,119.4 L532.3,108.4 L538.8,112.0 L546.3,115.2 L555.0,110.3 L559.5,101.2 L565.7,100.0 L576.0,89.7 L581.7,86.1 L588.5,86.5 L592.0,79.8 L604.7,64.3 L609.5,57.5 L617.6,45.1 L622.1,57.8 L622.8,58.7 L631.6,75.3 L632.9,86.0 L661.4,144.6 L662.9,112.4 L666.9,105.0 L670.1,104.2 L688.9,102.8 L701.4,73.4 L704.4,91.7 L707.2,88.5 L716.1,74.0 L726.4,76.2 L727.7,81.5 L739.1,104.0 L751.6,107.0 L777.0,69.6 L780.4,79.8 L797.5,116.0 L799.0,109.0 L812.7,111.1 L816.0,98.8 L822.8,83.5 L830.2,63.1 L833.9,67.0 L862.0,112.5 L874.2,88.3 L877.1,86.9 L889.9,97.8 L902.4,96.6 L902.8,100.1 L915.5,90.9 L942.9,73.9 L955.8,93.3 L959.6,104.5 L967.4,102.0" class="media"/>
+<path d="M62.0,132.7 L89.4,132.7 L89.4,116.8 L119.6,116.8 L119.6,100.4 L135.6,100.4 L135.6,53.9 L604.7,53.9 L604.7,41.6 L617.6,41.6 L617.6,30.9 L976.0,30.9" class="mejor"/>
+<circle cx="976.0" cy="30.9" r="4.5" class="punta"/></svg>

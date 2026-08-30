@@ -95,18 +95,23 @@ def verificar_muestras(runs, n_vec_max, h_max, hor_max, n_f_max=0,
     # El último valor es n_fourier: hay que cubrir el 0 (sin el bloque), el tope
     # y un recorte intermedio, que es donde se vería si las ondas se quedan
     # desordenadas o desplazadas al recortar columnas.
-    # El ultimo valor es n_rayos: hay que cubrir los tres conjuntos, porque el
+    # El ultimo valor es n_rayos: hay que cubrir TODOS los conjuntos, porque el
     # superset los guarda seguidos y una vista se queda con UN tramo; si los
     # desplazamientos estuvieran mal, una configuracion recibiria los rayos de
     # otra sin que nada fallara.
     import rayos
-    r8, r12, r18 = (rayos.CONJUNTOS if con_rayos else (0, 0, 0))
-    casos = [(n_vec_max, hor_max, h_max, n_f_max, r18),   # el propio superset
+    conj = list(rayos.CONJUNTOS) if con_rayos else []
+    r_max = conj[-1] if conj else 0
+    casos = [(n_vec_max, hor_max, h_max, n_f_max, r_max),  # el propio superset
              (2, 15, 3, 0, 0), (3, 10, 5, 0, 0), (1, 20, 2, 0, 0),
              (5, 15, 10, 0, 0),
-             (3, 15, 5, min(4, n_f_max), 0), (2, 10, 3, min(1, n_f_max), 0),
-             (3, 15, 5, 0, r8), (2, 20, 3, min(6, n_f_max), r12),
-             (5, 10, 10, n_f_max, r8)]
+             (3, 15, 5, min(4, n_f_max), 0), (2, 10, 3, min(1, n_f_max), 0)]
+    # Uno por conjunto, alternando el resto de la vista para que ningun tramo se
+    # compruebe siempre en el mismo sitio del vector.
+    for i, n_r in enumerate(conj):
+        n_f = (0, min(6, n_f_max), n_f_max)[i % 3]
+        casos.append(((3, 2, 5)[i % 3], (15, 20, 10)[i % 3], (5, 3, 10)[i % 3],
+                      n_f, n_r))
     for n_vec, horizonte, h_pasado, n_f, n_r in casos:
         if n_vec > n_vec_max or h_pasado > h_max or horizonte > hor_max:
             continue

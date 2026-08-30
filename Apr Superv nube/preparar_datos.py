@@ -55,8 +55,8 @@ HOR_MAX = 20
 # así que el eje se recorre sin volver a tocar los CSV; subir este tope sí
 # obliga a rehacer las muestras.
 N_F_MAX = pol.N_FOURIER_MAX
-# RAYOS al obstáculo (ver rayos.py). El superset guarda los tres conjuntos
-# (8, 12 y 18) y cada configuración se queda con el suyo. Aquí es donde de
+# RAYOS al obstáculo (ver rayos.py). El superset guarda todos los conjuntos de
+# rayos.CONJUNTOS y cada configuración se queda con el suyo. Aquí es donde de
 # verdad se miran los obstáculos: se recorre cada instante de cada ruta y se
 # traza contra el mapa, que es lo que no se puede sacar del CSV.
 CON_RAYOS = True

@@ -83,7 +83,36 @@ ESPACIO = {k: v for k, v in EN.ESPACIO.items() if k != "epocas"}
 #   tdr_flota_v3 — épocas fijas en EPOCAS_MAX y peajes decididos con la nota
 #                  real (conduciendo las flotas) en vez de con el error de
 #                  validación.
-NOMBRE_ESTUDIO = "tdr_flota_v3"
+#   tdr_flota_v4 — el eje n_rayos se desplaza a 22/27/32. Estudio nuevo y no
+#                  el mismo porque un eje categórico de Optuna no admite que le
+#                  cambien los valores por debajo: las pruebas de v3 se traen
+#                  enteras con su nota (ver ESTUDIO_ANTERIOR), así que no se
+#                  pierde nada, pero la distribución ya es otra.
+NOMBRE_ESTUDIO = "tdr_flota_v4"
+
+# De dónde nace un estudio nuevo. Sus pruebas completas se copian con su nota,
+# que es todo lo que el muestreador necesita para no empezar a ciegas. v3 ya
+# traía dentro las 310 de la fase aleatoria, así que copiándolo se hereda todo
+# el historial en un solo paso.
+ESTUDIO_ANTERIOR = "tdr_flota_v3"
+
+# RAYOS de las candidatas NUEVAS. El eje sigue teniendo los valores viejos
+# (0/8/12/18) porque son los de las 848 pruebas ya evaluadas, pero a partir de
+# aquí no se vuelve a probar ninguno: la media de nota subía monótona con el nº
+# de rayos y 18 era el tope, o sea que el intervalo se había quedado corto.
+#
+# No se puede conseguir quitándolos del espacio —Optuna descartaría el historial
+# entero por distribución incompatible—, así que se hace ENCOLANDO: cada
+# candidata nueva se mete en la cola con el n_rayos ya fijado y el muestreador
+# elige los otros catorce ejes. Lo que salga con otro valor (una cola vacía en
+# el peor momento) se descarta sin entrenar.
+N_RAYOS_NUEVOS = (22, 27, 32)
+
+# Cuántas candidatas se dejan esperando en la cola. Con tres trabajadores
+# tirando de ella a la vez, un colchón corto se vacía justo cuando dos terminan
+# seguidos; ocho sobra y no cuesta nada, porque una prueba encolada solo es una
+# fila en la base de datos.
+COLA_MIN = 8
 
 
 # --------------------------------------------------------------------------- #
@@ -206,6 +235,16 @@ def _tomar_cerrojo(carpeta, nombre="siembra.lock"):
     return True
 
 
+def _con_fechas(nuevo, viejo):
+    """Le pone al trial copiado las FECHAS del original. `create_trial` no las
+    admite como argumento y las pone a la hora de la copia, que dejaría al
+    estudio nuevo con ochocientas pruebas nacidas todas en el mismo minuto y el
+    gráfico de avance en blanco."""
+    nuevo.datetime_start = viejo.datetime_start
+    nuevo.datetime_complete = viejo.datetime_complete
+    return nuevo
+
+
 def sembrar_de_estudio(estudio, nombre_origen, almacen, verbose=True):
     """Trae de otro estudio SOLO las pruebas cuya nota es de fiar: las que
     entrenaron todas las épocas que pedía su configuración.
@@ -234,8 +273,28 @@ def sembrar_de_estudio(estudio, nombre_origen, almacen, verbose=True):
     ya = {t.user_attrs.get("origen")
           for t in estudio.get_trials(deepcopy=False)}
 
-    traidas, cortadas = 0, 0
+    traidas, podadas, cortadas = 0, 0, 0
     for t in viejo.get_trials(deepcopy=False):
+        # Las ABANDONADAS también se copian, con las notas de los peajes por los
+        # que pasaron y sin nota final. No son ruido: TPE las usa (una candidata
+        # que iba la última a las 24 épocas es información sobre esa zona) y el
+        # podador necesita la referencia de cada peaje para decidir a quién
+        # corta. Dejarlas fuera sería empezar el estudio nuevo con la mitad de
+        # lo que el anterior sabía.
+        if t.state == TrialState.PRUNED and t.intermediate_values:
+            if any(t.params.get(k) not in ESPACIO[k] for k in ESPACIO):
+                continue
+            origen = f"{nombre_origen}#{t.number}"
+            if origen in ya:
+                continue
+            ya.add(origen)
+            estudio.add_trial(_con_fechas(optuna.trial.create_trial(
+                params={k: t.params[k] for k in ESPACIO}, distributions=dists,
+                state=TrialState.PRUNED,
+                intermediate_values=dict(t.intermediate_values),
+                user_attrs=dict(t.user_attrs, origen=origen)), t))
+            podadas += 1
+            continue
         if t.state != TrialState.COMPLETE or t.value is None:
             continue
         hechas = t.user_attrs.get("epocas_hechas")
@@ -251,17 +310,59 @@ def sembrar_de_estudio(estudio, nombre_origen, almacen, verbose=True):
         if origen in ya:
             continue
         ya.add(origen)
-        estudio.add_trial(optuna.trial.create_trial(
+        # Se copia la prueba ENTERA, no solo su nota: fechas, anotaciones y las
+        # notas de los peajes. El muestreador solo necesita params y valor, pero
+        # el gráfico dibuja el avance en el tiempo y distingue lo entrenado de
+        # lo sembrado por esas anotaciones; sin ellas, un estudio que hereda al
+        # anterior arranca con el histórico en blanco.
+        estudio.add_trial(_con_fechas(optuna.trial.create_trial(
             params={k: t.params[k] for k in ESPACIO}, distributions=dists,
             value=t.value, state=TrialState.COMPLETE,
-            user_attrs={"origen": origen,
-                        "epocas_hechas": t.user_attrs.get("epocas_hechas")}))
+            intermediate_values=dict(t.intermediate_values),
+            user_attrs=dict(t.user_attrs, origen=origen)), t))
         traidas += 1
     if verbose:
-        print(f"[optuna] del estudio '{nombre_origen}': {traidas} pruebas "
-              f"válidas traídas, {cortadas} descartadas por estar a medio "
-              f"entrenar", flush=True)
-    return traidas
+        print(f"[optuna] del estudio '{nombre_origen}': {traidas} pruebas con "
+              f"nota y {podadas} abandonadas (con las notas de sus peajes), "
+              f"{cortadas} descartadas por estar a medio entrenar", flush=True)
+    return traidas + podadas
+
+
+def _cuenta_por_rayos(estudio, valores):
+    """Cuántas pruebas hay ya (de cualquier estado) con cada nº de rayos nuevo.
+    Sirve para repartir la cola de forma pareja en vez de sortear a ciegas."""
+    cuenta = {v: 0 for v in valores}
+    for t in estudio.get_trials(deepcopy=False):
+        r = t.params.get("n_rayos")
+        if r in cuenta:
+            cuenta[r] += 1
+    return cuenta
+
+
+def rellenar_cola(estudio, minimo=COLA_MIN, valores=N_RAYOS_NUEVOS,
+                  verbose=False):
+    """Deja siempre al menos `minimo` candidatas esperando con el n_rayos ya
+    fijado. Se encola SOLO ese eje: los otros catorce los propone TPE cuando
+    coge la prueba, con todo el historial delante.
+
+    Se reparte por el valor menos probado, así que los tres números nuevos
+    avanzan a la par en vez de dejar que el muestreador se quede con el primero
+    que le salga bien."""
+    from optuna.trial import TrialState
+    esperando = sum(1 for t in estudio.get_trials(deepcopy=False)
+                    if t.state == TrialState.WAITING)
+    faltan = minimo - esperando
+    if faltan <= 0:
+        return 0
+    cuenta = _cuenta_por_rayos(estudio, valores)
+    for _ in range(faltan):
+        v = min(valores, key=lambda x: cuenta[x])
+        cuenta[v] += 1
+        estudio.enqueue_trial({"n_rayos": v}, skip_if_exists=False)
+    if verbose:
+        print(f"[optuna] {faltan} candidatas encoladas con rayos "
+              f"{'/'.join(str(v) for v in valores)}", flush=True)
+    return faltan
 
 
 def reencolar_abandonadas(estudio, verbose=True):
@@ -287,6 +388,8 @@ def reencolar_abandonadas(estudio, verbose=True):
             continue
         if any(t.params.get(k) not in ESPACIO[k] for k in ESPACIO):
             continue                  # usa un valor ya retirado del espacio
+        if t.params.get("n_rayos") not in N_RAYOS_NUEVOS:
+            continue                  # rayos viejos: no se vuelven a entrenar
         clave = tuple(sorted(t.params.items()))
         if clave in hechas:
             continue
@@ -333,6 +436,15 @@ class Evaluador:
         torch = self.torch
         c = {k: trial.suggest_categorical(k, v) for k, v in ESPACIO.items()}
         c["epocas"] = EPOCAS_MAX          # ya no se sortea: lo fija el peaje
+        # Red de seguridad de la cola: el eje n_rayos conserva los valores
+        # viejos para no tirar el historial, pero ya no se entrena ninguno. Si
+        # una prueba llega sin pasar por la cola (se vació justo entre dos), se
+        # descarta aquí sin gastar una época. Además el superset solo guarda las
+        # columnas de rayos.CONJUNTOS: con otro valor reventaría al hacer la
+        # vista.
+        if c["n_rayos"] not in N_RAYOS_NUEVOS:
+            trial.set_user_attr("fallo", "rayos viejos (fuera de la tanda)")
+            raise optuna.TrialPruned("rayos viejos")
         t0 = time.perf_counter()
         peajes = self._peajes()
         media = escala = None
@@ -447,13 +559,20 @@ def construir_parser():
                          "dejan nota. Cortar pronto NO es un fallo: la "
                          "candidata simplemente no llega a hacer todas sus "
                          "épocas")
-    ap.add_argument("--min-epocas", dest="min_epocas", type=int, default=12,
+    ap.add_argument("--min-epocas", dest="min_epocas", type=int, default=24,
                     help="épocas que se le regalan a toda configuración antes "
-                         "de poder abandonarla (def. 12). Con 5 se abandonaba "
+                         "de poder abandonarla (def. 24). Con 5 se abandonaba "
                          "al 96 %%, y con sesgo: las redes grandes arrancan "
                          "despacio y se las mataba por lentas, no por malas "
                          "(ancho medio de las abandonadas 1225 frente a 853 "
-                         "de las que sobrevivían)")
+                         "de las que sobrevivían). Subió de 12 a 24 al doblar "
+                         "EPOCAS_MAX: los peajes van doblando desde aquí hasta "
+                         "el tope, así que con 12 y tope 160 salía un peaje MÁS "
+                         "que antes (12·24·48·96·160 frente a 12·24·48·80) y "
+                         "llegar al final pasaba a ser la mitad de probable. "
+                         "Con 24 vuelven a ser cuatro tramos y el presupuesto "
+                         "extra lo aprovecha el mismo porcentaje de candidatas, "
+                         "que era justo la idea de subirlo")
     ap.add_argument("--reduccion", type=int, default=2,
                     help="de cada N que llegan a un hito, sobrevive 1 (def. 2).\n"
                          "Con 3 sobrevivía 1 de cada 9 y se abandonaba al 95 %%: "
@@ -533,10 +652,18 @@ def main():
     # El cerrojo es un fichero creado con O_EXCL, que en Windows y en POSIX es
     # atómico: lo consigue exactamente uno. Los demás siguen sin sembrar, que es
     # justo lo que se quiere —la siembra ya la está haciendo otro—.
-    if not args.sin_siembra and _tomar_cerrojo(args.salida):
-        sembrar(estudio, args.salida)
-    if args.sembrar_de:
-        sembrar_de_estudio(estudio, args.sembrar_de, almacen)
+    #
+    # El cerrojo lleva el nombre del estudio: cada estudio se siembra una vez y
+    # empezar uno nuevo no obliga a borrar el de antes a mano.
+    if not args.sin_siembra and _tomar_cerrojo(
+            args.salida, f"siembra_{args.estudio}.lock"):
+        origen = args.sembrar_de or ESTUDIO_ANTERIOR
+        if origen and origen != args.estudio:
+            # Un estudio nuevo hereda al anterior, que ya trae dentro la fase
+            # aleatoria; sembrar además de los CSV duplicaría esas pruebas.
+            sembrar_de_estudio(estudio, origen, almacen)
+        else:
+            sembrar(estudio, args.salida)
     if args.rematar:
         reencolar_abandonadas(estudio)
 
@@ -575,7 +702,13 @@ def main():
         print(f"[optuna] prueba {trial.number} · {estado} · "
               f"{hechas} completas · mejor {mejor}", flush=True)
 
-    estudio.optimize(ev, n_trials=args.n_pruebas, callbacks=[traza],
+    def cola(estudio, trial):
+        """La cola se rellena después de CADA prueba: es lo que garantiza que la
+        siguiente candidata nazca con uno de los números de rayos nuevos."""
+        rellenar_cola(estudio)
+
+    rellenar_cola(estudio, verbose=True)
+    estudio.optimize(ev, n_trials=args.n_pruebas, callbacks=[traza, cola],
                      gc_after_trial=True)
     imprimir_resumen(estudio)
 

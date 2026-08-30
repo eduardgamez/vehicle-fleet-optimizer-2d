@@ -87,10 +87,10 @@ def columnas_vista(n_vec, h_pasado, n_vec_max, h_max, n_fourier=0, n_f_max=0,
     cols += list(range(base_ctx, base_ctx + DIM_CTX))
     base_f = base_ctx + DIM_CTX
     cols += list(range(base_f, base_f + pol.DIM_FOURIER * n_fourier))
-    # Rayos: el superset guarda los TRES conjuntos (8, 12 y 18) seguidos, porque
-    # no se derivan unos de otros —ocho direcciones repartidas por la
-    # circunferencia no son un subconjunto de dieciocho—. Aquí se coge el tramo
-    # que le toca a esta configuración.
+    # Rayos: el superset guarda TODOS los conjuntos (rayos.CONJUNTOS) seguidos,
+    # porque no se derivan unos de otros —veintidós direcciones repartidas por
+    # la circunferencia no son un subconjunto de treinta y dos—. Aquí se coge el
+    # tramo que le toca a esta configuración.
     if con_rayos and n_rayos:
         import rayos
         base_r = base_f + pol.DIM_FOURIER * n_f_max

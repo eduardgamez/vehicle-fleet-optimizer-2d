@@ -354,23 +354,73 @@ def configurar_representacion(n_vecinos=N_VECINOS, horizonte=HORIZONTE_VECINO,
     return DIM_ENTRADA
 
 
+_RESIDUAL = None
+
+
+def clase_residual():
+    """Capa que devuelve lo que recibe MÁS lo que calcula: y = x + f(x).
+
+    Es el atajo que hace entrenables las redes profundas. Sin él, con diez o
+    doce capas la corrección que viene de la salida tiene que atravesarlas todas
+    hacia atrás y llega tan diluida que las primeras casi no aprenden: una red
+    honda acaba saliendo peor que una de tres capas, y no por falta de
+    capacidad, sino porque no se ha llegado a entrenar. Con el atajo, cada capa
+    solo tiene que aportar una CORRECCIÓN sobre lo que ya había; si no aporta
+    nada, deja pasar la entrada tal cual.
+
+    La clase se construye la primera vez que se pide y no al importar el módulo:
+    politica.py se usa también donde no hay torch (la GUI, el generador).
+    """
+    global _RESIDUAL
+    if _RESIDUAL is None:
+        import torch.nn as nn
+
+        class Residual(nn.Module):
+            def __init__(self, bloque):
+                super().__init__()
+                self.bloque = bloque
+
+            def forward(self, x):
+                return x + self.bloque(x)
+
+        _RESIDUAL = Residual
+    return _RESIDUAL
+
+
 def crear_red(dim_entrada=DIM_ENTRADA, oculto=512, n_pred=N_PRED,
-              n_capas=3, dropout=0.0, activacion="relu", normalizacion="no"):
+              n_capas=3, dropout=0.0, activacion="relu", normalizacion="no",
+              residual=False):
     """MLP: dim_entrada → (oculto)×n_capas → 2·n_pred (a y giro normalizados).
     'n_capas' es el nº de capas OCULTAS, 'dropout' la prob. de apagado tras cada
     activación, 'activacion' la no linealidad (relu/gelu/silu) y 'normalizacion'
-    añade LayerNorm tras cada capa lineal ("no" o "layernorm")."""
+    añade LayerNorm tras cada capa lineal ("no" o "layernorm").
+
+    Con 'residual', todas las capas ocultas menos la primera se envuelven en un
+    atajo (ver Residual). Es lo que permite pasar de cuatro capas sin que la red
+    empeore por no entrenarse; con dos o tres capas no hace falta y por eso no
+    está activado por defecto."""
     import torch.nn as nn
     actos = {"relu": nn.ReLU, "gelu": nn.GELU, "silu": nn.SiLU}
     Act = actos.get(activacion, nn.ReLU)
-    capas, prev = [], dim_entrada
-    for _ in range(max(1, n_capas)):
-        capas.append(nn.Linear(prev, oculto))
+
+    def bloque(entra, sale):
+        partes = [nn.Linear(entra, sale)]
         if normalizacion == "layernorm":
-            capas.append(nn.LayerNorm(oculto))
-        capas.append(Act())
+            partes.append(nn.LayerNorm(sale))
+        partes.append(Act())
         if dropout > 0:
-            capas.append(nn.Dropout(dropout))
+            partes.append(nn.Dropout(dropout))
+        return partes
+
+    capas, prev = [], dim_entrada
+    for i in range(max(1, n_capas)):
+        partes = bloque(prev, oculto)
+        if residual and i > 0:
+            # Solo a partir de la segunda: la primera cambia el tamaño del
+            # vector (dim_entrada → oculto) y no se le puede sumar la entrada.
+            capas.append(clase_residual()(nn.Sequential(*partes)))
+        else:
+            capas.extend(partes)
         prev = oculto
     capas.append(nn.Linear(prev, 2 * n_pred))
     return nn.Sequential(*capas)
@@ -406,7 +456,8 @@ class Politica:
         red = crear_red(cfg["dim_entrada"], cfg["oculto"], cfg["n_pred"],
                         cfg.get("n_capas", 3), cfg.get("dropout", 0.0),
                         cfg.get("activacion", "relu"),
-                        cfg.get("normalizacion", "no"))
+                        cfg.get("normalizacion", "no"),
+                        cfg.get("residual", False))
         red.load_state_dict(punto["state_dict"])
         red.to(device).eval()
         media = torch.tensor(punto["media"], dtype=torch.float32, device=device)

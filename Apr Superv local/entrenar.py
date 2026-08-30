@@ -536,6 +536,7 @@ def _cfg(arq, nota=None, val=None):
             "n_fourier": pol.N_FOURIER, "lambda_fina": pol.LAMBDA_FINA,
             "n_rayos": pol.N_RAYOS,
             "normalizacion": arq.get("normalizacion", "no"),
+            "residual": arq.get("residual", False),
             "nota_rollout": nota, "val_mse": val}
 
 
