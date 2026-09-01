@@ -63,10 +63,16 @@ MODELOS = [
     ("d07x1024", 7, 1024, True),
     ("d07x2048", 7, 2048, True),
     ("d09x1024", 9, 1024, True),
-    ("d09x2048", 9, 2048, True),
     ("d11x1024", 11, 1024, True),
     ("d11x2048", 11, 2048, True),
-    ("control04x2048", 4, 2048, False),
+    # Aquí hubo un 10x3072 (85M parámetros). No llegó a medirse —no cabía con
+    # 0,27 de tarjeta— y se retiró en vez de recogerlo a solas: con la nota
+    # bajando en orden al añadir capas (7 → 11) y los dos controles de cuatro
+    # por encima de todas, esas cuatro horas ya no iban a cambiar la conclusión.
+    # El control comparte ANCHURA con el 10x3072 y no con el resto: así la
+    # pareja 4x3072 / 10x3072 cambia solo la profundidad y el atajo, que es la
+    # comparación que responde la pregunta del experimento.
+    ("control04x3072", 4, 3072, False),
 ]
 
 # Una sola semilla por modelo: esto no elige un campeón (para eso está la fase
