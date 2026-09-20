@@ -6,11 +6,10 @@
 #   bash "Apr Superv nube/gcp/lanzar.sh" muestras     # fase 1.5 (CPU, 1 máquina)
 #   bash "Apr Superv nube/gcp/lanzar.sh" amplia       # fase 2a (GPU, 35 % datos)
 #   bash "Apr Superv nube/gcp/lanzar.sh" fina         # fase 2b (GPU, 65 % datos)
-#   bash "Apr Superv nube/gcp/lanzar.sh" final        # fase 3 (100 % datos)
+#   bash "Apr Superv nube/gcp/lanzar.sh" final        # tras subir fase6 completa
 #
-# Las tres últimas van escalonadas a propósito: comparar miles de
-# configuraciones entre sí no necesita todo el dataset, afinar la rejilla sí
-# necesita bastante, y el modelo que se queda se entrena con todo.
+# «amplia» y «fina» corresponden al diseño inicial. Las fases 3–6 se ejecutaron
+# en local; para usar «final» en GCP hay que subir antes datos/modelos/fase6.
 set -euo pipefail
 
 PROYECTO="${TDR_PROYECTO:?exporta TDR_PROYECTO con el id del proyecto de GCP}"
@@ -87,7 +86,7 @@ final)
   ;;
 
 *)
-  echo "uso: lanzar.sh {preparar|generar|muestras|barrido|final}" >&2
+  echo "uso: lanzar.sh {preparar|generar|muestras|amplia|fina|final}" >&2
   exit 1
   ;;
 esac

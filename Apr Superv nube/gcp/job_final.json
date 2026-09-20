@@ -7,7 +7,7 @@
         "runnables": [
           {
             "script": {
-              "text": "gcloud storage rsync -r {{BUCKET}}/modelos /datos/modelos && gcloud storage rsync -r {{BUCKET}}/escenarios /datos/escenarios"
+              "text": "gcloud storage rsync -r {{BUCKET}}/modelos /datos/modelos && gcloud storage rsync -r {{BUCKET}}/muestras /datos/muestras && gcloud storage rsync -r {{BUCKET}}/escenarios /datos/escenarios"
             }
           },
           {
@@ -16,10 +16,17 @@
               "entrypoint": "python",
               "commands": [
                 "finalizar.py",
-                "--modelos", "/datos/modelos",
-                "--escenarios", "/datos/escenarios"
+                "--fase6", "/datos/modelos/fase6",
+                "--muestras", "/datos/muestras",
+                "--escenarios", "/datos/escenarios",
+                "--salida", "/datos/modelos/politica.pt"
               ],
-              "volumes": ["/datos:/datos"]
+              "volumes": [
+                "/datos:/datos",
+                "/var/lib/nvidia/lib64:/usr/local/nvidia/lib64",
+                "/var/lib/nvidia/bin:/usr/local/nvidia/bin"
+              ],
+              "options": "--privileged"
             }
           }
         ],
@@ -27,8 +34,8 @@
           "cpuMilli": 8000,
           "memoryMib": 30000
         },
-        "maxRetryCount": 2,
-        "maxRunDuration": "7200s",
+        "maxRetryCount": 0,
+        "maxRunDuration": "43200s",
         "volumes": [
           {
             "deviceName": "trabajo",
@@ -38,7 +45,8 @@
         "environment": {
           "variables": {
             "TDR_BUCKET": "{{BUCKET}}",
-            "TDR_DATOS": "/datos"
+            "TDR_DATOS": "/datos",
+            "LD_LIBRARY_PATH": "/usr/local/nvidia/lib64"
           }
         }
       }
@@ -47,8 +55,9 @@
   "allocationPolicy": {
     "instances": [
       {
+        "installGpuDrivers": true,
         "policy": {
-          "machineType": "c4-standard-8",
+          "machineType": "g2-standard-8",
           "provisioningModel": "STANDARD",
           "disks": [
             {

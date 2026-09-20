@@ -39,6 +39,7 @@ RUN pip install --no-cache-dir -r requirements_nube.txt
 COPY ["mapas/", "./mapas/"]
 COPY ["Apr Superv local/nucleo.py", "Apr Superv local/politica.py", \
       "Apr Superv local/generador.py", "Apr Superv local/entrenar.py", \
+      "Apr Superv local/rayos.py", \
       "./Apr Superv local/"]
 COPY ["Apr Superv nube/", "./Apr Superv nube/"]
 

@@ -52,13 +52,13 @@ BASE.update(oculto=2048, residual=False)
 
 CAPAS = (3, 4, 5)
 DROPOUTS = (0.2, 0.3, 0.4)
-# 800 se retiró con la rejilla a medias. Las seis parejas comparables de 480 y
-# 640 ya habían salido TODAS a favor de 480 (la mejor de 640 se quedó en 0,1226
-# frente a 0,1250), así que el presupuesto había dejado de ser el cuello y los
-# nueve puntos de 800 eran nueve horas para confirmar lo mismo.
+# 800 se retiró con la rejilla a medias porque las primeras comparaciones
+# favorecían a 480. La rejilla terminada corrigió esa lectura: 640 ganó en 7 de
+# las 9 parejas. Se conservan aquí los 18 puntos realmente ejecutados; la fase 6
+# revalida la zona ganadora con semillas independientes.
 EPOCAS = (480, 640)
 
-# Una semilla por punto: son 27 puntos y lo que se busca es la FORMA de la
+# Una semilla por punto: son 18 puntos y lo que se busca es la FORMA de la
 # superficie (dónde sube y dónde baja), no el campeón. El ganador se revalida
 # después con varias semillas, como se hizo en la fase 3.
 SEMILLAS = (0,)

@@ -367,7 +367,63 @@ class Datos:
 ANCHURA_BF16 = 1024
 
 
-def entrenar_config(V, datos, c, device, criba=None, enfasis=1.0, aviso=None):
+class EntrenamientoPausado(RuntimeError):
+    """La tarea dejó un checkpoint completo y puede reanudarse."""
+
+    def __init__(self, epoca, ruta):
+        super().__init__("pausado en época %d (%s)" % (epoca, ruta))
+        self.epoca = epoca
+        self.ruta = ruta
+
+
+def _guardar_checkpoint(ruta, c, dim_entrada, epoca, red, opt, plani,
+                        mejor_val, mejor_estado, segundos):
+    """Guarda de forma atómica todo lo necesario para continuar exactamente."""
+    import torch
+    asegurar(os.path.dirname(ruta))
+    temporal = "%s.tmp-%d" % (ruta, os.getpid())
+    punto = {
+        "version": 1,
+        "config": dict(c),
+        "dim_entrada": int(dim_entrada),
+        "epoca": int(epoca),
+        "segundos": float(segundos),
+        "red": red.state_dict(),
+        "optimizador": opt.state_dict(),
+        "planificador_lr": plani.state_dict(),
+        "mejor_val": float(mejor_val),
+        "mejor_estado": mejor_estado,
+        "rng_torch": torch.get_rng_state(),
+        "rng_cuda": (torch.cuda.get_rng_state_all()
+                     if torch.cuda.is_available() else None),
+        "rng_numpy": np.random.get_state(),
+        "rng_python": _rnd.getstate(),
+    }
+    try:
+        torch.save(punto, temporal)
+        os.replace(temporal, ruta)
+    finally:
+        if os.path.exists(temporal):
+            os.remove(temporal)
+    meta = {
+        "version": 1,
+        "epoca": int(epoca),
+        "epocas": int(c["epocas"]),
+        "segundos": round(float(segundos), 1),
+        "actualizado": time.time(),
+    }
+    meta_tmp = ruta + ".json.tmp-%d" % os.getpid()
+    try:
+        with open(meta_tmp, "w", encoding="utf-8") as f:
+            json.dump(meta, f, ensure_ascii=False, indent=2)
+        os.replace(meta_tmp, ruta + ".json")
+    finally:
+        if os.path.exists(meta_tmp):
+            os.remove(meta_tmp)
+
+
+def entrenar_config(V, datos, c, device, criba=None, enfasis=1.0, aviso=None,
+                    checkpoint=None, pausa=None, cada_checkpoint=10):
     """Entrena una red y devuelve (mejor_state_dict, mejor_val, épocas hechas).
 
     'aviso' es una función opcional que se llama al final de cada época con
@@ -375,7 +431,11 @@ def entrenar_config(V, datos, c, device, criba=None, enfasis=1.0, aviso=None):
     devuelve True, se corta ahí. Es el enganche que usa la búsqueda con Optuna
     para abandonar pronto las configuraciones que van mal (ver
     buscar_optuna.py); la criba por mediana de aquí arriba hace lo mismo pero
-    sin coordinarse con nadie."""
+    sin coordinarse con nadie.
+
+    Con 'checkpoint' guarda periódicamente el estado completo. Si además existe
+    el fichero indicado por 'pausa', guarda al terminar la época actual y lanza
+    EntrenamientoPausado. Una llamada posterior continúa por la siguiente."""
     import copy
     import torch
 
@@ -420,7 +480,29 @@ def entrenar_config(V, datos, c, device, criba=None, enfasis=1.0, aviso=None):
         else torch.enable_grad
 
     mejor_val, mejor_estado, hechas = float("inf"), None, 0
-    for ep in range(1, epocas + 1):
+    segundos_previos = 0.0
+    if checkpoint and os.path.isfile(checkpoint):
+        punto = torch.load(checkpoint, map_location=device, weights_only=False)
+        if (punto.get("config") != dict(c)
+                or int(punto.get("dim_entrada", -1)) != int(V.shape[1])):
+            raise ValueError("El checkpoint no corresponde a esta configuración")
+        red.load_state_dict(punto["red"])
+        opt.load_state_dict(punto["optimizador"])
+        plani.load_state_dict(punto["planificador_lr"])
+        mejor_val = float(punto["mejor_val"])
+        mejor_estado = punto.get("mejor_estado")
+        hechas = int(punto["epoca"])
+        segundos_previos = float(punto.get("segundos", 0.0))
+        torch.set_rng_state(punto["rng_torch"].cpu())
+        if device.type == "cuda" and punto.get("rng_cuda") is not None:
+            torch.cuda.set_rng_state_all([s.cpu() for s in punto["rng_cuda"]])
+        np.random.set_state(punto["rng_numpy"])
+        _rnd.setstate(punto["rng_python"])
+        print("[checkpoint] reanudando en época %d/%d" % (hechas, epocas),
+              flush=True)
+
+    inicio_sesion = time.perf_counter()
+    for ep in range(hechas + 1, epocas + 1):
         red.train()
         perm = torch.randperm(len(idx_tr), device=datos.dev_datos)
         for i in range(0, len(perm), lote):
@@ -451,6 +533,14 @@ def entrenar_config(V, datos, c, device, criba=None, enfasis=1.0, aviso=None):
         if math.isfinite(lv) and lv < mejor_val:
             mejor_val = lv
             mejor_estado = copy.deepcopy(red.state_dict())
+        pide_pausa = bool(checkpoint and pausa and os.path.exists(pausa))
+        if checkpoint and (pide_pausa or ep == epocas
+                           or ep % max(1, int(cada_checkpoint)) == 0):
+            transcurrido = segundos_previos + time.perf_counter() - inicio_sesion
+            _guardar_checkpoint(checkpoint, c, V.shape[1], ep, red, opt, plani,
+                                mejor_val, mejor_estado, transcurrido)
+        if pide_pausa:
+            raise EntrenamientoPausado(ep, checkpoint)
         if ep in hitos and criba.para(hitos[ep], mejor_val):
             break
         # Se le pasan también la red y el mejor estado: quien avisa puede querer
@@ -460,6 +550,8 @@ def entrenar_config(V, datos, c, device, criba=None, enfasis=1.0, aviso=None):
             break
     if mejor_estado is None:
         mejor_estado = copy.deepcopy(red.state_dict())
+    red._segundos_entrenamiento = (segundos_previos + time.perf_counter()
+                                   - inicio_sesion)
     return red, mejor_estado, mejor_val, hechas
 
 
