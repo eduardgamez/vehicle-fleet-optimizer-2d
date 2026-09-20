@@ -16,15 +16,16 @@ ejes que sí se están moviendo:
 
     capas    3 · 4 · 5          (alrededor de las 4 que ganan)
     dropout  0,2 · 0,3 · 0,4    (0,4 no se había probado nunca)
-    épocas   480 · 640 · 800    (para ver dónde deja de subir)
+    épocas   480 · 640          (para ver dónde deja de subir)
 
-27 combinaciones. Las épocas van bien separadas a propósito: entre 480 y 520 hay
+18 combinaciones. Las épocas van bien separadas a propósito: entre 480 y 520 hay
 un 8 % de diferencia y el ruido entre semillas es de 0,008-0,030, así que ese
-eje habría medido ruido en vez de presupuesto.
+eje habría medido ruido en vez de presupuesto. Empezaron siendo tres niveles
+(hasta 800) y se quedaron en dos: ver el comentario de EPOCAS.
 
 La anchura se queda fija en 2048: es la que gana (0,1250 frente a 0,1229 del
 3072), la que la fase 3 dejó arriba, y encima la más rápida de las dos —26 min
-frente a 116—, que es lo que hace viable barrer 27 puntos. Todo lo demás es la
+frente a 116—, que es lo que hace viable barrer la rejilla entera. Todo lo demás es la
 receta heredada, sin atajo residual (con 3-5 capas no hace falta).
 
 Uso:
@@ -51,7 +52,11 @@ BASE.update(oculto=2048, residual=False)
 
 CAPAS = (3, 4, 5)
 DROPOUTS = (0.2, 0.3, 0.4)
-EPOCAS = (480, 640, 800)
+# 800 se retiró con la rejilla a medias. Las seis parejas comparables de 480 y
+# 640 ya habían salido TODAS a favor de 480 (la mejor de 640 se quedó en 0,1226
+# frente a 0,1250), así que el presupuesto había dejado de ser el cuello y los
+# nueve puntos de 800 eran nueve horas para confirmar lo mismo.
+EPOCAS = (480, 640)
 
 # Una semilla por punto: son 27 puntos y lo que se busca es la FORMA de la
 # superficie (dónde sube y dónde baja), no el campeón. El ganador se revalida
@@ -63,7 +68,7 @@ PATRON = "fase5_t*.csv"
 
 
 def configs():
-    """(nombre, config) de los 27 puntos de la rejilla.
+    """(nombre, config) de los puntos de la rejilla.
 
     El orden importa: se recorre por ÉPOCAS de menor a mayor, así que si hay que
     parar a media tanda queda medida la rejilla entera con el presupuesto corto
