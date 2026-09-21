@@ -63,10 +63,6 @@ El repositorio se compone de los siguientes archivos y carpetas:
 ### Mapas y datos
 - **`mapas/`** — Directorio donde se almacenan y cargan los mapas de obstáculos exportados o importados desde imágenes en formato JSON.
 
-### Aprendizaje supervisado
-- **`Apr Superv local/`** — Primer pipeline local: generación de rutas, entrenamiento, modelo original e interfaz de comprobación.
-- **`Apr Superv nube/`** — Pipeline ampliado: datos generados en Google Cloud, preparación por lotes, búsqueda de hiperparámetros, modelo final e interfaz visual.
-
 ### Configuración y despliegue
 - **`requirements.txt`** — Lista de librerías de Python requeridas (`flask`, `numpy`, `numba`, `pillow`, `gunicorn`).
 - **`render.yaml`** — Configuración de despliegue como servicio web en Render, configurando workers de Gunicorn, hilos de trabajo y la caché de compilación de Numba.
