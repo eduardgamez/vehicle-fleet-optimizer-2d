@@ -48,9 +48,10 @@ def modelos_disponibles(carpeta=MODELOS_DIR):
 
 
 def modelo_por_defecto(carpeta=MODELOS_DIR):
-    """Modelo definitivo si existe; mientras tanto, el récord de fase 5."""
+    """Modelo definitivo si existe; mientras tanto, el ganador de fase 6."""
     preferidos = [
         os.path.join(carpeta, "politica.pt"),
+        os.path.join(carpeta, "fase6", "mejor_c5-d20-e640_s2.pt"),
         os.path.join(carpeta, "fase5", "mejor_c5-d20-e640.pt"),
     ]
     for ruta in preferidos:
@@ -368,7 +369,7 @@ def construir_parser():
     ap = argparse.ArgumentParser(
         description="Interfaz visual para los modelos de Apr Superv nube.")
     ap.add_argument("--modelo", default=None,
-                    help="fichero .pt (por defecto: final o mejor de fase 5)")
+                    help="fichero .pt (por defecto: final o ganador de fase 6)")
     ap.add_argument("--escenario", type=int, default=1,
                     help="escenario inicial de selección, empezando en 1")
     return ap

@@ -7,7 +7,7 @@
         "runnables": [
           {
             "script": {
-              "text": "gcloud storage rsync -r {{BUCKET}}/modelos /datos/modelos && gcloud storage rsync -r {{BUCKET}}/muestras /datos/muestras && gcloud storage rsync -r {{BUCKET}}/escenarios /datos/escenarios"
+              "text": "gcloud storage rsync -r {{BUCKET}}/modelos /datos/modelos && gcloud storage rsync -r {{BUCKET}}/escenarios /datos/escenarios"
             }
           },
           {
@@ -15,9 +15,8 @@
               "imageUri": "{{IMAGEN}}",
               "entrypoint": "python",
               "commands": [
-                "finalizar.py",
+                "fase8.py",
                 "--fase6", "/datos/modelos/fase6",
-                "--muestras", "/datos/muestras",
                 "--escenarios", "/datos/escenarios",
                 "--salida", "/datos/modelos/politica.pt"
               ],

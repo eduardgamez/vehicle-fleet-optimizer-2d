@@ -9,8 +9,8 @@ fase 3. Esta fase fija las candidatas antes de mirar más resultados y las mide
 con tres semillas nuevas e independientes de la semilla 0 que las seleccionó.
 
 Se elige por la media de las tres notas. Después no se ajustan más
-hiperparámetros: solo queda entrenar una vez el ganador con una semilla fijada y
-medirlo una única vez sobre test.
+hiperparámetros: la fase 8 toma la mejor instancia de la configuración ganadora
+y la mide una única vez sobre test.
 
 Uso:
     python fase6.py --idt 0 --frac-vram 0.27      (uno de tres procesos)
