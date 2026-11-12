@@ -277,10 +277,11 @@ para que la interfaz antigua también pueda abrirlo.
 ## Ampliación de los datos en Google Cloud
 
 La generación local era correcta, pero el planificador clásico necesita mucho
-tiempo para producir miles de rutas. Por eso se preparó `Apr Superv nube/`: el
-trabajo se dividió en tareas independientes, cada una con semillas distintas,
-archivos de progreso y sincronización periódica. Si una máquina se detenía, la
-tarea podía continuar desde lo ya guardado.
+tiempo para producir miles de rutas. Por eso se preparó `Apr Superv nube/`: la
+generación se repartió entre tareas, cada una encargada de planificar un conjunto
+de escenarios independientes con semillas distintas. Los archivos de progreso y
+la sincronización periódica permitían continuar desde lo ya guardado tras una
+interrupción.
 
 La nube se utilizó para **generar las rutas con el planificador clásico**. El
 gasto real anotado al cerrar esa ejecución fue de **aproximadamente 364 € en
