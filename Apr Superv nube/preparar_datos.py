@@ -76,7 +76,7 @@ def leer_archivo(arch):
     reutilizados y las gemelas salen de la misma planificación), y descartarlos
     por el id se llevaba por delante justo esos —un 24 % del dataset—. Una
     semilla reintentada tras un corte, en cambio, reescribe filas IDÉNTICAS."""
-    from entrenar import _parsear_condiciones
+    from entrenar import _parsear_condiciones, corregir_giro
     runs, vistos = [], set()
     conds, filas, run_actual, opt_actual = None, {}, None, "secuencial"
 
@@ -116,6 +116,7 @@ def leer_archivo(arch):
                 vid = int(c[1])
                 x1, y1, x2, y2 = map(float, c[3:7])
                 v, th, a, giro = map(float, c[7:11])
+                giro = corregir_giro(giro)
             except (ValueError, IndexError):
                 continue                      # línea truncada por un corte
             filas.setdefault(vid, []).append(

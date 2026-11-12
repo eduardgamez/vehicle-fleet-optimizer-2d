@@ -356,7 +356,8 @@ Los valores de optimización pertenecían al proceso externo de entrenamiento.
 La selección combinó el error de imitación o MSE con una evaluación en bucle
 cerrado. En las primeras mediciones, la correlación entre MSE y colisiones fue
 aproximadamente `-0,03`: una red podía copiar bien los controles medios y
-conducir mal al acumular pequeños errores. Cada candidata pasó por flotas
+conducir mal al acumular pequeños errores (la «Revisión de las etiquetas de
+giro» añade una segunda causa). Cada candidata pasó por flotas
 completas, con detección de colisiones y hasta 300 segundos simulados por
 escenario.
 
@@ -419,6 +420,7 @@ La búsqueda quedó registrada por fases:
 | 5 | Rejilla de 3–5 capas, dropout `0,2–0,4` y 480/640 épocas | 640 épocas ganó en 7 de 9 comparaciones. La mejor medida aislada fue `0,1312` con 5 capas y dropout `0,2`. |
 | 6 | Cuatro finalistas repetidas con tres semillas nuevas | Ganó `c5-d20-e640`: media `0,12509`, desviación `0,00687` y notas `0,12589`, `0,13307` y `0,11631`. |
 | 8 | Publicación de la mejor instancia de la configuración ganadora y apertura única de test | La semilla 2 quedó elegida antes de medir test. |
+| 9 | Doce configuraciones reentrenadas con las etiquetas de giro corregidas, tres semillas y 320 épocas | En curso. Se describe en «Revisión de las etiquetas de giro». |
 
 Las fases 5 y 6 sumaron respectivamente 29 h 19 min y 25 h 26 min de tiempo de
 proceso medido. El tiempo de reloj dependió del paralelismo de hasta tres
@@ -469,6 +471,92 @@ sistema completo en este conjunto.
 El modelo definitivo está en `Apr Superv nube/datos/modelos/politica.pt`. La
 interfaz visual se abre con `Apr Superv nube/gui.bat` y lo selecciona por
 defecto.
+
+## Diagnóstico del modelo en bucle cerrado
+
+Para entender de dónde vienen las colisiones se midió el modelo final sobre 150
+escenarios de selección y sobre 150 escenarios del propio conjunto de
+entrenamiento, comparando en estos últimos su recorrido con el del planificador
+desde las mismas condiciones iniciales:
+
+| Medida | Resultado |
+|---|---:|
+| Vehículos que chocan en escenarios de selección | 95,4 % |
+| Vehículos que chocan en escenarios de entrenamiento | 92,7 % |
+| Desvío mediano respecto al planificador a 1 s / 2 s / 5 s | 0,12 m / 0,31 m / 0,88 m |
+| Margen con el que conduce el planificador | 0,10 m al mapa, 0,15 m a otros vehículos |
+| Instante mediano del primer contacto | 4,2 s |
+| Primer contacto contra el mapa | 80 % de los casos |
+
+La tasa de colisión es casi la misma en escenarios ya vistos que en escenarios
+nuevos, así que el límite está en la conducción y no en la variedad de
+situaciones. A los dos segundos la red ya se ha separado de la ruta del
+planificador más que el margen con el que este conduce, y a partir de ahí se
+encuentra en estados que el conjunto de datos no contiene: todas las rutas
+grabadas van centradas en su trayectoria ideal y ninguna muestra cómo volver a
+ella.
+
+También se midió cada cuántos pasos conviene volver a consultar a la red. El
+modelo predice diez pasos y los ejecuta todos antes de preguntar de nuevo. Al
+consultar en cada paso la tasa de colisión se mantiene en el 95,4 %, mientras
+que la de llegada baja del 94,4 % al 42,3 %. El refresco de diez pasos se
+conserva como referencia.
+
+## Revisión de las etiquetas de giro
+
+El diagnóstico destapó un error en las etiquetas. El giro del volante se
+reconstruía a partir de dos poses consecutivas con una arcotangente de dos
+argumentos, que con velocidad negativa devuelve el ángulo desplazado ±π. El
+valor es físicamente equivalente, porque la tangente se repite cada π, pero
+queda fuera del rango del volante, y al recortarlo en la simulación se
+convertía en giro máximo en el sentido contrario.
+
+| Medida sobre las 612.770 muestras | Antes | Después |
+|---|---:|---:|
+| Muestras en marcha atrás con giro fuera de rango | 100 % (18 % del total) | 0 % |
+| Varianza de la etiqueta de giro normalizada | 4,35 | 0,22 |
+| Parte de la energía del giro aportada por la marcha atrás | 97 % | — |
+
+Esto afecta a tres cosas a la vez: al objetivo que copia la red en marcha
+atrás, al error de imitación —dominado por esas muestras, lo que ayuda a
+explicar que apenas guardase relación con las colisiones— y a la entrada de
+controles pasados, que llevaba el mismo valor. Todos los resultados de las
+fases 1 a 8, incluidas las lecturas por eje y el modelo publicado, son
+anteriores a esta corrección.
+
+La corrección se aplica en dos sitios: en la generación
+(`nucleo.muestras_supervisadas`), para las rutas futuras, y en la lectura de
+los CSV (`entrenar.corregir_giro`), para las ya calculadas. Un volante real
+nunca alcanza los 90°, así que el valor original se recupera sin ambigüedad y
+las rutas generadas en la nube se aprovechan tal cual. Las muestras corregidas
+están en `Apr Superv nube/datos/muestras_giro`.
+
+### Fase 9: reválida con los datos corregidos
+
+Como el error pudo alterar el orden entre configuraciones, la fase 9
+(`fase9.py`) reentrena doce desde cero, con tres semillas y 320 épocas, igual
+que la fase 3:
+
+- la campeona de la fase 6 (5 × 2.048) y la ganadora de la fase 3 (4 × 2.048);
+- seis de las cuarenta mejores de la fase 2, elegidas para ser lo más distintas
+  posible entre sí en capas, anchura, activación, tasa de aprendizaje, lote,
+  vecinos, horizonte, mezcla, Fourier y rayos;
+- cuatro variantes de la campeona en los ejes más expuestos al error: historia
+  de controles de 3 y de 10 pasos, dropout `0,35` y tasa de aprendizaje `0,001`.
+
+Se entrena desde cero para que la nota de cada configuración refleje solo la
+configuración. Los resultados se añadirán aquí cuando termine la tanda.
+
+## Siguiente paso: enseñar a recuperarse
+
+El diagnóstico apunta a la acumulación de error como causa principal de las
+colisiones. La técnica prevista es **DART**: perturbar ligeramente al vehículo a
+lo largo de las rutas del planificador y grabar la maniobra con la que vuelve a
+su trayectoria, de modo que la red disponga de ejemplos de corrección. La
+magnitud de las perturbaciones se calibrará con el desvío que mida el modelo de
+la fase 9. **DAgger** —dejar conducir a la red y pedir al planificador la
+acción correcta en los estados que ella misma visita— queda como alternativa
+para las situaciones que DART no cubra.
 
 # Parte III — Aprendizaje por refuerzo
 

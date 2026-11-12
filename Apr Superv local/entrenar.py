@@ -113,6 +113,7 @@ def leer_runs(carpeta):
                 vid = int(c[1])
                 x1, y1, x2, y2 = map(float, c[3:7])
                 v, th, a, giro = map(float, c[7:11])
+                giro = corregir_giro(giro)
                 # Estado por instante: centro del OBB (mitad de las esquinas
                 # opuestas), rumbo, velocidad y el control aplicado.
                 filas.setdefault(vid, []).append(
@@ -412,6 +413,22 @@ def _opt_de_run(arch, rid):
                     return ("secuencial" if "opt=" not in linea
                             else linea.split("opt=", 1)[1].split()[0])
     return "secuencial"
+
+
+def corregir_giro(giro):
+    """Giro del volante devuelto a (−π/2, π/2).
+
+    Los CSV generados antes del arreglo de `nucleo.muestras_supervisadas`
+    guardan el giro de la marcha atrás desplazado ±π (salía de un atan2 con la
+    velocidad negativa): valores de ~±2,9 rad cuando el volante real no pasa de
+    ~0,7. Eran el 18 % de las filas y el 97 % de la energía de la etiqueta de
+    giro. Un volante real nunca llega a π/2, así que la corrección es inequívoca
+    y no toca los CSV ya correctos."""
+    if giro > math.pi / 2.0:
+        return giro - math.pi
+    if giro < -math.pi / 2.0:
+        return giro + math.pi
+    return giro
 
 
 def escenarios_eval(carpeta):

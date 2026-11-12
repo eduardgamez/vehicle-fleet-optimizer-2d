@@ -3249,7 +3249,11 @@ def muestras_supervisadas(veh):
         a = (vel[i + 1] - vel[i]) / DT if i < n - 1 else 0.0
         if i < n - 1 and abs(v) > 1e-6:
             dth = ang_norm(traj[i + 1][2] - th)
-            giro = math.atan2(L * dth, v * DT)
+            # atan y NO atan2: marcha atrás (v < 0) atan2 devuelve el ángulo
+            # desplazado ±π —físicamente equivalente, porque la tangente se
+            # repite cada π, pero fuera de [−giro_max, giro_max]—, y al
+            # recortarlo el volante quedaba a tope en el sentido contrario.
+            giro = math.atan(L * dth / (v * DT))
         else:
             giro = 0.0
         filas.append((veh.vid, i, x1, y1, x2, y2, v, th, a, giro))
