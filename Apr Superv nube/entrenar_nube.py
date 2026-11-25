@@ -400,7 +400,16 @@ def _guardar_checkpoint(ruta, c, dim_entrada, epoca, red, opt, plani,
         "rng_python": _rnd.getstate(),
     }
     try:
-        torch.save(punto, temporal)
+        # Sincronizado a disco ANTES de darlo por bueno: si el ordenador se
+        # apaga de golpe, un fichero ya renombrado pero aún en la caché del
+        # sistema queda truncado. Y el guardado anterior se conserva como
+        # '.prev', para que ni un corte en el peor instante deje sin nada.
+        with open(temporal, "wb") as f:
+            torch.save(punto, f)
+            f.flush()
+            os.fsync(f.fileno())
+        if os.path.isfile(ruta):
+            os.replace(ruta, ruta + ".prev")
         os.replace(temporal, ruta)
     finally:
         if os.path.exists(temporal):
@@ -481,8 +490,21 @@ def entrenar_config(V, datos, c, device, criba=None, enfasis=1.0, aviso=None,
 
     mejor_val, mejor_estado, hechas = float("inf"), None, 0
     segundos_previos = 0.0
-    if checkpoint and os.path.isfile(checkpoint):
-        punto = torch.load(checkpoint, map_location=device, weights_only=False)
+    punto = None
+    if checkpoint:
+        # Un apagón puede dejar el último guardado ilegible: se prueba entonces
+        # el anterior y, si tampoco, se empieza esta red de cero.
+        for cand in (checkpoint, checkpoint + ".prev"):
+            if not os.path.isfile(cand):
+                continue
+            try:
+                punto = torch.load(cand, map_location=device,
+                                   weights_only=False)
+                break
+            except Exception as e:
+                print("[checkpoint] %s ilegible (%s)"
+                      % (os.path.basename(cand), type(e).__name__), flush=True)
+    if punto is not None:
         if (punto.get("config") != dict(c)
                 or int(punto.get("dim_entrada", -1)) != int(V.shape[1])):
             raise ValueError("El checkpoint no corresponde a esta configuración")

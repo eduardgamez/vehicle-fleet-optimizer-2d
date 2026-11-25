@@ -63,7 +63,8 @@ CONFIGS = [
     (0.0971, _c(n_capas=3, activacion="silu", lr=0.001, n_vecinos=4,
                 h_pasado=2, horizonte=10, weight_decay=0.0, n_rayos=32)),
     (0.1002, _c(n_capas=3, lote=512, n_vecinos=5, horizonte=10,
-                weight_decay=0.0, n_fourier=12, n_rayos=12)),
+                weight_decay=0.0, n_fourier=12)),    # era n_rayos=12, que
+    #                         ya no está en el superset (18/22/27/32): va con 18
     (0.1005, _c(n_capas=4, activacion="relu", lr=0.001, n_vecinos=5,
                 horizonte=10, weight_decay=0.0, mezcla="natural")),
     (0.0806, _c(n_capas=3, oculto=512, h_pasado=2, weight_decay=0.0,
@@ -83,10 +84,107 @@ def tareas(_estudio=None, _n=None):
     return [(fase3.id_config(c), nota, c) for nota, c in CONFIGS]
 
 
+def ruta_checkpoint(carpeta, cid, semilla):
+    return os.path.join(carpeta, "checkpoints",
+                        "%s_s%d.checkpoint.pt" % (cid, semilla))
+
+
+def main():
+    """El bucle de la fase 3, con un añadido: cada entrenamiento guarda su
+    estado completo cada pocas épocas. El ordenador puede apagarse en cualquier
+    momento; al relanzar (fase9.bat), cada tarea a medias continúa por la época
+    siguiente a la última guardada, con los mismos números aleatorios, en vez de
+    empezar de cero."""
+    import time
+    import numpy as np
+    import torch
+    import entrenar_nube as EN
+    import escenarios as esc
+
+    ap = fase3.construir_parser()
+    ap.add_argument("--cada-checkpoint", dest="cada_checkpoint", type=int,
+                    default=5, help="épocas entre guardados (def. 5)")
+    ap.set_defaults(salida=CARPETA, muestras=MUESTRAS)
+    args = ap.parse_args()
+    fase3.asegurar(args.salida)
+    if args.resumen:
+        fase3.resumen(args.salida)
+        return
+
+    lista = tareas()
+    print("[fase9] %d configuraciones x %d semillas x %d épocas"
+          % (len(lista), len(fase3.SEMILLAS), args.epocas), flush=True)
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if device.type == "cuda" and 0 < args.frac_vram < 1.0:
+        torch.cuda.set_per_process_memory_fraction(args.frac_vram)
+
+    datos = EN.Datos(args.muestras, device, 1.0, None, en_cpu=args.en_cpu)
+    flotas, opts = esc.flotas(esc.cargar("seleccion", args.escenarios),
+                              limite=args.n_escenarios)
+    ruta_csv = os.path.join(args.salida, "fase3_t%d.csv" % args.idt)
+    hechas = fase3.filas_hechas(args.salida)
+    if args.reanudar:
+        fase3.limpiar_reservas(args.salida, hechas)
+    sin_sitio = set()
+    for semilla in fase3.SEMILLAS:
+        for cid, nota_prev, params in lista:
+            if ((cid, semilla) in hechas or (cid, semilla) in sin_sitio
+                    or not fase3._reservar(args.salida, cid, semilla)):
+                continue
+            c = dict(params)
+            c["epocas"] = args.epocas
+            torch.manual_seed(semilla)
+            torch.cuda.manual_seed_all(semilla)
+            np.random.seed(semilla)
+            ini = time.perf_counter()
+            checkpoint = ruta_checkpoint(args.salida, cid, semilla)
+            try:
+                V, media, escala = datos.vista(c["n_vecinos"], c["horizonte"],
+                                               c["h_pasado"], c["n_fourier"],
+                                               c["n_rayos"])
+                red, estado, val, eps = EN.entrenar_config(
+                    V, datos, c, device, criba=None, enfasis=args.enfasis,
+                    checkpoint=checkpoint,
+                    cada_checkpoint=args.cada_checkpoint)
+            except torch.cuda.OutOfMemoryError:
+                torch.cuda.empty_cache()
+                fase3._soltar(args.salida, cid, semilla)
+                sin_sitio.add((cid, semilla))
+                print("[fase9] %s s%d: no cabe en memoria" % (cid, semilla),
+                      flush=True)
+                continue
+            fin = time.perf_counter()
+            nota = EN.nota_de(red, estado, media, escala, device, flotas, opts, c)
+            # El tiempo cuenta también las sesiones anteriores al apagón.
+            segs = round(getattr(red, "_segundos_entrenamiento", fin - ini)
+                         + time.perf_counter() - fin, 1)
+            # Primero el modelo y luego la fila: la fila es lo que da la tarea
+            # por hecha, así que un corte entre las dos repite solo la nota.
+            EN.guardar_mejor(args.salida, "%s_s%d" % (cid, semilla),
+                             (nota, val, dict(c), media.cpu().numpy(),
+                              escala.cpu().numpy(),
+                              {n: t.detach().cpu() for n, t in estado.items()},
+                              V.shape[1]))
+            fase3._anotar(ruta_csv, dict(
+                {k: params[k] for k in fase3.EJES},
+                id_config=cid, semilla=semilla, nota=round(float(nota), 5),
+                nota_fase2=round(float(nota_prev), 5),
+                val_mse=round(float(val), 5), epocas=int(eps), segundos=segs,
+                dim_entrada=int(V.shape[1])))
+            for parcial in (checkpoint, checkpoint + ".json",
+                            checkpoint + ".prev"):
+                try:
+                    os.remove(parcial)
+                except FileNotFoundError:
+                    pass
+            print("[fase9] %s s%d: nota %.4f (antes: %.4f) · %.1f min"
+                  % (cid, semilla, nota, nota_prev, segs / 60.0), flush=True)
+            del red, estado, V
+            torch.cuda.empty_cache()
+    print("[fase9] no queda nada por hacer en este proceso", flush=True)
+
+
 if __name__ == "__main__":
-    fase3.mejores_configs = tareas
-    if "--salida" not in sys.argv:
-        sys.argv += ["--salida", CARPETA]
-    if "--muestras" not in sys.argv:
-        sys.argv += ["--muestras", MUESTRAS]
-    fase3.main()
+    main()
